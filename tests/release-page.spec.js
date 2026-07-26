@@ -115,7 +115,7 @@ test("release page external links match the approved destinations", async ({ pag
     "href",
     "https://github.com/Neo-Isshin/actanara/blob/main/README.md",
   );
-  await expect(page.getByRole("link", { name: "GPL-3.0-or-later", exact: true })).toHaveAttribute(
+  await expect(page.getByRole("link", { name: "MIT", exact: true })).toHaveAttribute(
     "href",
     "https://github.com/Neo-Isshin/actanara/blob/main/LICENSE",
   );

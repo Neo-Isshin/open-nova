@@ -1,20 +1,20 @@
-import hashlib
 import tomllib
 import unittest
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-GPL_V3_OFFICIAL_SHA256 = "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986"
 
 
 class LicenseMetadataTests(unittest.TestCase):
-    def test_license_is_unmodified_official_gpl_v3_text(self):
-        payload = (ROOT / "LICENSE").read_bytes()
+    def test_license_is_mit_with_correct_copyright_holder(self):
+        text = (ROOT / "LICENSE").read_text(encoding="utf-8")
 
-        self.assertEqual(hashlib.sha256(payload).hexdigest(), GPL_V3_OFFICIAL_SHA256)
+        self.assertTrue(text.startswith("MIT License"))
+        self.assertIn("Permission is hereby granted, free of charge", text)
+        self.assertIn("Copyright (c) 2026 Neo-Isshin", text)
 
-    def test_pep639_metadata_declares_gpl_v3_or_later(self):
+    def test_pep639_metadata_declares_mit(self):
         metadata = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
 
         self.assertEqual(metadata["project"]["version"], "1.4.0")
@@ -23,7 +23,7 @@ class LicenseMetadataTests(unittest.TestCase):
             metadata["project"]["authors"],
             [{"name": "Neo-Isshin", "email": "nxc8335@gmail.com"}],
         )
-        self.assertEqual(metadata["project"]["license"], "GPL-3.0-or-later")
+        self.assertEqual(metadata["project"]["license"], "MIT")
         self.assertEqual(metadata["project"]["license-files"], ["LICENSE"])
         self.assertEqual(
             metadata["project"]["urls"],
@@ -47,7 +47,7 @@ class LicenseMetadataTests(unittest.TestCase):
             with self.subTest(name=name):
                 content = (ROOT / name).read_text(encoding="utf-8")
                 self.assertIn("Copyright © 2026 Neo-Isshin.", content)
-                self.assertIn("GPL-3.0-or-later", content)
+                self.assertIn("`MIT`", content)
                 self.assertIn("](LICENSE)", content)
 
     def test_public_entrypoints_use_the_shared_main_setup_channel(self):

@@ -17,7 +17,7 @@
   <a href="https://neo-isshin.github.io/actanara/"><img src="https://img.shields.io/badge/Website-GitHub%20Pages-2563EB" alt="Website"></a>
   <a href="https://github.com/Neo-Isshin/actanara/releases/latest"><img src="https://img.shields.io/github/v/release/Neo-Isshin/actanara?display_name=tag&amp;sort=semver" alt="Latest stable Release"></a>
   <a href="https://neo-isshin.github.io/actanara/dashboard-demo/"><img src="https://img.shields.io/badge/Demo-interactive-7C3AED" alt="Interactive Dashboard Demo"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/License-GPL--3.0--or--later-16A34A" alt="License"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-16A34A" alt="License"></a>
   <a href="https://discord.gg/JvJHngZWz"><img src="https://img.shields.io/badge/Discord-Join-5865F2" alt="Discord"></a>
 </p>
 
@@ -348,7 +348,7 @@ The release builder accepts only a clean, committed Git worktree and writes outp
 
 Copyright © 2026 Neo-Isshin.
 
-Actanara is free software licensed under the [GNU General Public License, version 3 or any later version](LICENSE), with SPDX identifier `GPL-3.0-or-later`.
+Actanara is licensed under the [MIT License](LICENSE), with SPDX identifier `MIT`.
 
 ## 🙏 Acknowledgements
 

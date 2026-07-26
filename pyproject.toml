@@ -10,7 +10,7 @@ readme = "README.md"
 authors = [
   { name = "Neo-Isshin", email = "nxc8335@gmail.com" },
 ]
-license = "GPL-3.0-or-later"
+license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.11"
 dependencies = []
