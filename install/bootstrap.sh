@@ -11,7 +11,6 @@ DEFAULT_SOURCE_URL="https://github.com/Neo-Isshin/actanara.git"
 SOURCE_ROOT="${ACTANARA_INSTALL_SOURCE_ROOT:-}"
 SOURCE_URL="${ACTANARA_INSTALL_SOURCE_URL:-}"
 SOURCE_REF="${ACTANARA_INSTALL_REF:-}"
-FOLLOW_OFFICIAL_MAIN=0
 GIT_BIN="${ACTANARA_INSTALL_GIT:-git}"
 PLUTIL_BIN="${ACTANARA_INSTALL_PLUTIL:-/usr/bin/plutil}"
 ZSH_BIN="${ACTANARA_INSTALL_ZSH:-${ZSH_VERSION:+/bin/zsh}}"
@@ -52,7 +51,7 @@ Preparation options:
   --source-url URL         Download Actanara from this URL.
                           Default: https://github.com/Neo-Isshin/actanara.git
   --ref VERSION           Use an exact 40- or 64-character version ID.
-                          Omit it to use the latest official main version.
+                          Required for network setup unless the Release asset pins it.
   --cache-root PATH        Download cache folder. Default: ~/.cache/actanara/installer
   --git PATH              Git executable. Default: git
   --offline               Use local or previously downloaded files only.
@@ -72,8 +71,8 @@ bootstrap_text() {
         downloading) print -r -- "Downloading Actanara" ;;
         checking_updates) print -r -- "Checking the selected Actanara version" ;;
         preparing_files) print -r -- "Preparing installation files" ;;
-        latest_ready) print -r -- "Latest version downloaded" ;;
         cache_ready) print -r -- "Previously downloaded files are ready" ;;
+        source_plan_ready) print -r -- "Immutable source plan is ready; no cached installer was executed" ;;
         cache_isolated) print -r -- "The previous download folder was kept; using a new download folder" ;;
         existing_ready) print -r -- "Existing Actanara data will be kept and updated" ;;
         legacy_repair_prompt) print -r -- "This Actanara installation cannot be updated directly. Reinstall it in place? Your data and settings will be kept; only the runtime and dependencies will be rebuilt. [Y/n]" ;;
@@ -105,8 +104,8 @@ bootstrap_text() {
         downloading) print -r -- "下载 Actanara" ;;
         checking_updates) print -r -- "检查所选 Actanara 版本" ;;
         preparing_files) print -r -- "准备安装文件" ;;
-        latest_ready) print -r -- "已获取最新版本" ;;
         cache_ready) print -r -- "已准备此前下载的文件" ;;
+        source_plan_ready) print -r -- "已生成不可变源码计划，未执行缓存安装器" ;;
         cache_isolated) print -r -- "已保留原下载文件夹，将使用新的下载文件夹" ;;
         existing_ready) print -r -- "已保留现有 Actanara 数据，将直接更新" ;;
         legacy_repair_prompt) print -r -- "当前 Actanara 不能直接升级，是否进行覆盖安装？现有数据与设置不会丢失，只会重建运行环境与依赖。 [Y/n]" ;;
@@ -209,7 +208,13 @@ run_cmd() {
   bootstrap_ok "$label"
 }
 
-git_exec() {
+git_exec() (
+  unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE
+  unset GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES
+  unset GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT
+  unset GIT_CEILING_DIRECTORIES GIT_DISCOVERY_ACROSS_FILESYSTEM GIT_PREFIX
+  unset GIT_ALLOW_PROTOCOL GIT_PROTOCOL_FROM_USER GIT_EXEC_PATH GIT_TEMPLATE_DIR
+  unset GIT_SSH GIT_SSH_COMMAND
   if [[ "$OFFLINE" == "1" ]]; then
     # A cached partial clone may otherwise fetch a missing promisor object from
     # inside object inspection or checkout even though bootstrap never invokes
@@ -219,16 +224,53 @@ git_exec() {
     # user/system Git configuration are also excluded.
     GIT_NO_LAZY_FETCH=1 \
     GIT_ALLOW_PROTOCOL= \
+    GIT_NO_REPLACE_OBJECTS=1 \
     GIT_TERMINAL_PROMPT=0 \
     GIT_CONFIG_NOSYSTEM=1 \
     GIT_CONFIG_GLOBAL=/dev/null \
       "${GIT_BIN}" \
         -c protocol.allow=never \
+        -c protocol.ext.allow=never \
         -c core.hooksPath=/dev/null \
+        -c core.fsmonitor=false \
         "$@"
     return $?
   fi
-  "${GIT_BIN}" "$@"
+  GIT_NO_REPLACE_OBJECTS=1 \
+  GIT_TERMINAL_PROMPT=0 \
+  GIT_CONFIG_NOSYSTEM=1 \
+  GIT_CONFIG_GLOBAL=/dev/null \
+    "${GIT_BIN}" \
+      -c protocol.ext.allow=never \
+      -c core.hooksPath=/dev/null \
+      -c core.fsmonitor=false \
+      "$@"
+)
+
+cache_git_exec() {
+  local root="$1"
+  shift
+  git_exec \
+    --git-dir="${root}/.git" \
+    --work-tree="${root}" \
+    "$@"
+}
+
+validate_cache_layout() {
+  local root="$1"
+  local physical_root=""
+  if [[ ! -d "$root" || -L "$root" || ! -d "$root/.git" || -L "$root/.git" ]]; then
+    bootstrap_problem cache_mismatch "installer cache layout is unsafe"
+    return 2
+  fi
+  physical_root="$(cd "$root" 2>/dev/null && pwd -P)" || {
+    bootstrap_problem cache_mismatch "installer cache layout could not be resolved"
+    return 2
+  }
+  if [[ "$physical_root" != "$root" ]]; then
+    bootstrap_problem cache_mismatch "installer cache source escaped the selected cache root"
+    return 2
+  fi
 }
 
 run_git_cmd() {
@@ -259,14 +301,23 @@ run_git_cmd() {
   bootstrap_ok "$label"
 }
 
+run_cache_git_cmd() {
+  local root="$1"
+  shift
+  run_git_cmd \
+    --git-dir="${root}/.git" \
+    --work-tree="${root}" \
+    "$@"
+}
+
 configure_sparse_checkout() {
   local root="$1"
   if [[ "$CACHE_SOURCE" != "1" ]]; then
     return 0
   fi
   log "Configuring installer source sparse checkout"
-  run_git_cmd -C "${root}" sparse-checkout init --no-cone
-  run_git_cmd -C "${root}" sparse-checkout set "${SPARSE_PATHS[@]}"
+  run_cache_git_cmd "${root}" sparse-checkout init --no-cone
+  run_cache_git_cmd "${root}" sparse-checkout set "${SPARSE_PATHS[@]}"
 }
 
 installer_arg_present() {
@@ -284,7 +335,7 @@ verify_offline_source_cache() {
   local root="$1"
   local ref="$2"
   local resolved_object=""
-  resolved_object="$(git_exec -C "${root}" rev-parse --verify "${ref}^{commit}" 2>/dev/null || true)"
+  resolved_object="$(cache_git_exec "${root}" rev-parse --verify "${ref}^{commit}" 2>/dev/null || true)"
   resolved_object="${resolved_object:l}"
   if [[ "$resolved_object" != "$ref" ]]; then
     bootstrap_problem version_unavailable "resolved source object does not match required commit ${ref}"
@@ -298,7 +349,7 @@ verify_offline_source_cache() {
   # git_exec forbids lazy fetch and every transport for every probe.
   local required_path=""
   for required_path in "${OFFLINE_SOURCE_PATHS[@]}"; do
-    if ! git_exec -C "${root}" cat-file -e "${ref}:${required_path}" 2>/dev/null; then
+    if ! cache_git_exec "${root}" cat-file -e "${ref}:${required_path}" 2>/dev/null; then
       bootstrap_problem offline_missing "offline source cache is incomplete for commit ${ref}"
       return 2
     fi
@@ -309,7 +360,7 @@ verify_offline_source_cache() {
     bootstrap_problem offline_missing "unable to create a private offline source inventory"
     return 2
   }
-  if ! git_exec -C "${root}" ls-tree -r -z --full-tree "${ref}" -- "${OFFLINE_SOURCE_PATHS[@]}" > "${inventory_file}"; then
+  if ! cache_git_exec "${root}" ls-tree -r -z --full-tree "${ref}" -- "${OFFLINE_SOURCE_PATHS[@]}" > "${inventory_file}"; then
     rm -f "${inventory_file}"
     bootstrap_problem offline_missing "offline source cache inventory is incomplete for commit ${ref}"
     return 2
@@ -342,7 +393,7 @@ verify_offline_source_cache() {
         ;;
     esac
     if ! is_full_commit_id "${object_id}" \
-      || ! git_exec -C "${root}" cat-file blob "${object_id}" > /dev/null 2>&1; then
+      || ! cache_git_exec "${root}" cat-file blob "${object_id}" > /dev/null 2>&1; then
       inventory_invalid=1
       break
     fi
@@ -804,31 +855,6 @@ select_installer_mode_before_source_writes() {
   done
 }
 
-resolve_official_main_commit() {
-  local source_root="$1"
-  local resolved_commit=""
-  if [[ "$DRY_RUN" == "1" && ! -d "${source_root}/.git" ]]; then
-    local remote_line=""
-    local remote_ref=""
-    remote_line="$(git_exec ls-remote --exit-code "$SOURCE_URL" refs/heads/main 2>/dev/null || true)"
-    resolved_commit="${remote_line%%[[:space:]]*}"
-    remote_ref="${remote_line#*[[:space:]]}"
-    if [[ "$remote_ref" != "refs/heads/main" ]]; then
-      resolved_commit=""
-    fi
-  else
-    resolved_commit="$(git_exec -C "$source_root" rev-parse --verify 'refs/remotes/origin/main^{commit}' 2>/dev/null || true)"
-  fi
-  resolved_commit="${resolved_commit:l}"
-  if ! is_full_commit_id "$resolved_commit"; then
-    bootstrap_problem version_unavailable "official origin/main did not resolve to an exact commit"
-    return 2
-  fi
-  log "Selected latest official main commit: ${resolved_commit}" >&2
-  bootstrap_ok "$(bootstrap_text latest_ready)" >&2
-  print -rn -- "$resolved_commit"
-}
-
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --source-root)
@@ -936,7 +962,8 @@ if [[ -z "$SOURCE_ROOT" ]]; then
       bootstrap_problem version_invalid "custom source URL requires an exact version ID"
       exit 2
     fi
-    FOLLOW_OFFICIAL_MAIN=1
+    bootstrap_problem version_invalid "network setup requires a Release-pinned installer or an exact version ID"
+    exit 2
   elif ! is_full_commit_id "$SOURCE_REF"; then
     bootstrap_problem version_invalid "remote version must be a full 40- or 64-character commit ID"
     exit 2
@@ -948,10 +975,11 @@ if [[ -z "$SOURCE_ROOT" ]]; then
   BOOTSTRAP_LOG_FILE="${cache_root}/bootstrap.log"
   CACHE_SOURCE=1
   if [[ -d "${SOURCE_ROOT}/.git" ]]; then
-    existing_source_url="$(git_exec -C "${SOURCE_ROOT}" remote get-url origin 2>/dev/null || true)"
+    validate_cache_layout "${SOURCE_ROOT}" || exit $?
+    existing_source_url="$(cache_git_exec "${SOURCE_ROOT}" remote get-url origin 2>/dev/null || true)"
     if ! source_urls_match "$existing_source_url" "$SOURCE_URL"; then
       if [[ "$CACHE_ROOT_EXPLICIT" == "0" ]] && source_urls_match "$SOURCE_URL" "$DEFAULT_SOURCE_URL"; then
-        cache_root="${cache_root}/official-main"
+        cache_root="${cache_root}/official-release"
         SOURCE_ROOT="${cache_root}/source"
         BOOTSTRAP_LOG_FILE="${cache_root}/bootstrap.log"
         bootstrap_ok "$(bootstrap_text cache_isolated)"
@@ -965,7 +993,8 @@ if [[ -z "$SOURCE_ROOT" ]]; then
     prepare_bootstrap_log "$cache_root"
   fi
   if [[ -d "${SOURCE_ROOT}/.git" ]]; then
-    existing_source_url="$(git_exec -C "${SOURCE_ROOT}" remote get-url origin 2>/dev/null || true)"
+    validate_cache_layout "${SOURCE_ROOT}" || exit $?
+    existing_source_url="$(cache_git_exec "${SOURCE_ROOT}" remote get-url origin 2>/dev/null || true)"
     if ! source_urls_match "$existing_source_url" "$SOURCE_URL"; then
       bootstrap_problem cache_mismatch "download cache source does not match requested source"
       exit 2
@@ -973,11 +1002,14 @@ if [[ -z "$SOURCE_ROOT" ]]; then
     log "Updating existing source checkout: ${SOURCE_ROOT}"
     if [[ "$OFFLINE" != "1" ]]; then
       configure_sparse_checkout "${SOURCE_ROOT}"
-      if [[ "$FOLLOW_OFFICIAL_MAIN" == "1" ]]; then
-        run_git_cmd -C "${SOURCE_ROOT}" fetch --force origin \
-          '+refs/heads/main:refs/remotes/origin/main'
-      else
-        run_git_cmd -C "${SOURCE_ROOT}" fetch --all --tags --force
+      run_cache_git_cmd "${SOURCE_ROOT}" fetch --force origin "${SOURCE_REF}"
+      if [[ "$DRY_RUN" != "1" ]]; then
+        fetched_ref="$(cache_git_exec "${SOURCE_ROOT}" rev-parse --verify 'FETCH_HEAD^{commit}' 2>/dev/null || true)"
+        fetched_ref="${fetched_ref:l}"
+        if [[ "$fetched_ref" != "$SOURCE_REF" ]]; then
+          bootstrap_problem version_unavailable "fetched source object does not match required commit ${SOURCE_REF}"
+          exit 2
+        fi
       fi
     else
       verify_offline_source_cache "${SOURCE_ROOT}" "${SOURCE_REF}" || exit $?
@@ -997,22 +1029,30 @@ if [[ -z "$SOURCE_ROOT" ]]; then
     fi
     run_git_cmd clone --filter=blob:none --sparse --no-checkout "${SOURCE_URL}" "${SOURCE_ROOT}"
     configure_sparse_checkout "${SOURCE_ROOT}"
-    if [[ "$FOLLOW_OFFICIAL_MAIN" == "1" ]]; then
-      run_git_cmd -C "${SOURCE_ROOT}" fetch --force origin \
-        '+refs/heads/main:refs/remotes/origin/main'
+    run_cache_git_cmd "${SOURCE_ROOT}" fetch --force origin "${SOURCE_REF}"
+    if [[ "$DRY_RUN" != "1" ]]; then
+      fetched_ref="$(cache_git_exec "${SOURCE_ROOT}" rev-parse --verify 'FETCH_HEAD^{commit}' 2>/dev/null || true)"
+      fetched_ref="${fetched_ref:l}"
+      if [[ "$fetched_ref" != "$SOURCE_REF" ]]; then
+        bootstrap_problem version_unavailable "fetched source object does not match required commit ${SOURCE_REF}"
+        exit 2
+      fi
     fi
   fi
+fi
+
+if [[ "$CACHE_SOURCE" == "1" && "$DRY_RUN" == "1" ]]; then
+  log "Dry-run planned immutable source commit ${SOURCE_REF}; no cached worktree was executed"
+  bootstrap_ok "$(bootstrap_text source_plan_ready)"
+  exit 0
 fi
 
 SOURCE_ROOT="${SOURCE_ROOT:A}"
 SELECTED_REF=""
 if [[ "$CACHE_SOURCE" == "1" ]]; then
-  if [[ "$FOLLOW_OFFICIAL_MAIN" == "1" ]]; then
-    SOURCE_REF="$(resolve_official_main_commit "$SOURCE_ROOT")" || exit $?
-  fi
   SELECTED_REF="$SOURCE_REF"
   if [[ "$DRY_RUN" != "1" ]]; then
-    resolved_object="$(git_exec -C "${SOURCE_ROOT}" rev-parse --verify "${SOURCE_REF}^{commit}" 2>/dev/null || true)"
+    resolved_object="$(cache_git_exec "${SOURCE_ROOT}" rev-parse --verify "${SOURCE_REF}^{commit}" 2>/dev/null || true)"
     resolved_object="${resolved_object:l}"
     if [[ "$resolved_object" != "$SOURCE_REF" ]]; then
       bootstrap_problem version_unavailable "resolved source object does not match required commit ${SOURCE_REF}"
@@ -1020,15 +1060,15 @@ if [[ "$CACHE_SOURCE" == "1" ]]; then
     fi
   fi
   log "Selecting immutable source commit: ${SOURCE_REF}"
-  run_git_cmd -C "${SOURCE_ROOT}" checkout --detach "${SOURCE_REF}"
+  run_cache_git_cmd "${SOURCE_ROOT}" checkout --detach "${SOURCE_REF}"
 fi
 
 if [[ "$CACHE_SOURCE" == "1" ]]; then
   selected_ref="$SELECTED_REF"
   log "Resetting installer-owned source checkout to ${selected_ref}"
-  run_git_cmd -C "${SOURCE_ROOT}" reset --hard "${selected_ref}"
-  log "Cleaning ignored artifacts from installer-owned source checkout"
-  run_git_cmd -C "${SOURCE_ROOT}" clean -fdX
+  run_cache_git_cmd "${SOURCE_ROOT}" reset --hard "${selected_ref}"
+  log "Cleaning untracked artifacts from installer-owned source checkout"
+  run_cache_git_cmd "${SOURCE_ROOT}" clean -fdx --
 fi
 
 if [[ "$DRY_RUN" == "1" && ! -f "${SOURCE_ROOT}/install/install.sh" ]]; then

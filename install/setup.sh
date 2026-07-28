@@ -6,7 +6,7 @@ set -eu
 umask 077
 
 DEFAULT_SOURCE_URL="https://github.com/Neo-Isshin/actanara.git"
-SOURCE_ROOT="${ACTANARA_INSTALL_SOURCE_ROOT:-}"
+SOURCE_ROOT=""
 SOURCE_URL="${ACTANARA_INSTALL_SOURCE_URL:-$DEFAULT_SOURCE_URL}"
 SOURCE_REF="${ACTANARA_INSTALL_REF:-}"
 CACHE_ROOT="${ACTANARA_INSTALL_CACHE_ROOT:-$HOME/.cache/actanara/installer}"
@@ -20,10 +20,10 @@ setup_usage() {
 Actanara cross-platform setup entrypoint
 
 Usage:
-  curl -fsSL https://raw.githubusercontent.com/Neo-Isshin/actanara/main/install/setup.sh | sh
+  curl -fsSL https://github.com/Neo-Isshin/actanara/releases/latest/download/install.sh | sh
 
-The same command selects the existing macOS installer or the Linux installer.
-All options are forwarded to the selected platform adapter.
+The Release-pinned command selects the macOS or Linux installer. All options
+are forwarded to the selected platform adapter.
 EOF
 }
 
@@ -118,12 +118,38 @@ canonical_source_url() {
   esac
 }
 
-git_exec() {
+git_exec() (
+  unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE
+  unset GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES
+  unset GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT
+  unset GIT_CEILING_DIRECTORIES GIT_DISCOVERY_ACROSS_FILESYSTEM GIT_PREFIX
+  unset GIT_ALLOW_PROTOCOL GIT_PROTOCOL_FROM_USER GIT_EXEC_PATH GIT_TEMPLATE_DIR
+  unset GIT_SSH GIT_SSH_COMMAND
+  if [ "$OFFLINE" = "1" ]; then
+    GIT_TERMINAL_PROMPT=0 \
+    GIT_CONFIG_NOSYSTEM=1 \
+    GIT_CONFIG_GLOBAL=/dev/null \
+    GIT_NO_REPLACE_OBJECTS=1 \
+    GIT_NO_LAZY_FETCH=1 \
+    GIT_ALLOW_PROTOCOL= \
+      "$GIT_BIN" \
+        -c protocol.allow=never \
+        -c protocol.ext.allow=never \
+        -c core.hooksPath=/dev/null \
+        -c core.fsmonitor=false \
+        "$@"
+    return $?
+  fi
   GIT_TERMINAL_PROMPT=0 \
   GIT_CONFIG_NOSYSTEM=1 \
   GIT_CONFIG_GLOBAL=/dev/null \
-    "$GIT_BIN" -c core.hooksPath=/dev/null "$@"
-}
+  GIT_NO_REPLACE_OBJECTS=1 \
+    "$GIT_BIN" \
+      -c protocol.ext.allow=never \
+      -c core.hooksPath=/dev/null \
+      -c core.fsmonitor=false \
+      "$@"
+)
 
 select_platform_adapter() {
   detected_platform="$(uname -s 2>/dev/null || printf unknown)"
@@ -154,32 +180,79 @@ select_platform_adapter() {
 }
 
 resolve_local_adapter_root() {
-  if [ -n "$SOURCE_ROOT" ]; then
-    printf '%s' "$SOURCE_ROOT"
+  [ -n "$SOURCE_ROOT" ] || return 1
+  printf '%s' "$SOURCE_ROOT"
+}
+
+create_private_temp_root() {
+  if [ -n "$TEMP_ROOT" ]; then
     return 0
   fi
-  if [ "$OFFLINE" = "1" ] && [ -f "$CACHE_ROOT/source/$ADAPTER_PATH" ]; then
-    printf '%s' "$CACHE_ROOT/source"
-    return 0
+  TEMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/actanara-setup.XXXXXXXX")" || {
+    setup_error "could not create a private setup directory"
+    exit 2
+  }
+}
+
+cached_source_contains_selected_adapter() (
+  candidate_source="$1"
+  if [ ! -d "$candidate_source" ] || [ -L "$candidate_source" ] ||
+    [ ! -d "$candidate_source/.git" ] || [ -L "$candidate_source/.git" ]; then
+    return 1
   fi
-  case "$0" in
-    */*)
-      script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd -P) || return 1
-      candidate_root=$(CDPATH= cd -- "$script_dir/.." 2>/dev/null && pwd -P) || return 1
-      if [ -f "$candidate_root/$ADAPTER_PATH" ]; then
-        printf '%s' "$candidate_root"
-        return 0
-      fi
-      ;;
-  esac
-  return 1
+  candidate_origin="$(
+    git_exec \
+      --git-dir="$candidate_source/.git" \
+      --work-tree="$candidate_source" \
+      remote get-url origin 2>/dev/null ||
+      true
+  )"
+  if [ "$(canonical_source_url "$candidate_origin")" != "$canonical_url" ]; then
+    return 1
+  fi
+  candidate_ref="$(
+    git_exec \
+      --git-dir="$candidate_source/.git" \
+      --work-tree="$candidate_source" \
+      rev-parse --verify "$SOURCE_REF^{commit}" 2>/dev/null ||
+      true
+  )"
+  candidate_ref="$(printf '%s' "$candidate_ref" | tr '[:upper:]' '[:lower:]')"
+  [ "$candidate_ref" = "$SOURCE_REF" ] || return 1
+  git_exec \
+    --git-dir="$candidate_source/.git" \
+    --work-tree="$candidate_source" \
+    cat-file -e "$SOURCE_REF:$ADAPTER_PATH" 2>/dev/null
+)
+
+extract_cached_exact_adapter() {
+  cached_source=""
+  primary_cached_source="$CACHE_ROOT/source"
+  isolated_cached_source="$CACHE_ROOT/official-release/source"
+  if cached_source_contains_selected_adapter "$primary_cached_source"; then
+    cached_source="$primary_cached_source"
+  elif [ "$canonical_url" = "$DEFAULT_SOURCE_URL" ] &&
+    cached_source_contains_selected_adapter "$isolated_cached_source"; then
+    cached_source="$isolated_cached_source"
+  fi
+  if [ -z "$cached_source" ]; then
+    setup_error "offline setup requires the selected commit in a matching installer cache"
+    exit 2
+  fi
+  create_private_temp_root
+  adapter_file="$TEMP_ROOT/adapter"
+  if ! git_exec \
+    --git-dir="$cached_source/.git" \
+    --work-tree="$cached_source" \
+    cat-file blob "$SOURCE_REF:$ADAPTER_PATH" > "$adapter_file"; then
+    setup_error "the cached commit does not contain $ADAPTER_PATH"
+    exit 2
+  fi
+  chmod 700 "$adapter_file"
+  DOWNLOADED_ADAPTER="$adapter_file"
 }
 
 download_exact_adapter() {
-  if [ "$OFFLINE" = "1" ]; then
-    setup_error "offline setup requires --source-root or a populated installer cache"
-    exit 2
-  fi
   if ! command -v "$GIT_BIN" >/dev/null 2>&1 && [ ! -x "$GIT_BIN" ]; then
     setup_error "Git is required to resolve the platform adapter"
     exit 2
@@ -190,8 +263,8 @@ download_exact_adapter() {
       setup_error "a custom source URL requires an exact 40- or 64-character --ref"
       exit 2
     fi
-    remote_line="$(git_exec ls-remote --exit-code "$SOURCE_URL" refs/heads/main 2>/dev/null || true)"
-    SOURCE_REF="${remote_line%%[[:space:]]*}"
+    setup_error "network setup requires a Release-pinned install.sh or an exact --ref"
+    exit 2
   fi
   if ! is_full_commit_id "$SOURCE_REF"; then
     setup_error "the selected source did not resolve to an exact commit"
@@ -199,10 +272,12 @@ download_exact_adapter() {
   fi
   SOURCE_REF="$(printf '%s' "$SOURCE_REF" | tr '[:upper:]' '[:lower:]')"
 
-  TEMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/actanara-setup.XXXXXXXX")" || {
-    setup_error "could not create a private setup directory"
-    exit 2
-  }
+  if [ "$OFFLINE" = "1" ]; then
+    extract_cached_exact_adapter
+    return 0
+  fi
+
+  create_private_temp_root
   git_exec init --quiet "$TEMP_ROOT/source"
   git_exec -C "$TEMP_ROOT/source" remote add origin "$SOURCE_URL"
   git_exec -C "$TEMP_ROOT/source" fetch --quiet --depth=1 --filter=blob:none origin "$SOURCE_REF"
@@ -230,9 +305,16 @@ run_platform_adapter() {
       exit 2
     fi
     if [ "$ADAPTER_PATH" = "install/bootstrap-linux.sh" ]; then
-      ACTANARA_INSTALL_PUBLIC_ENTRY=1 "$ADAPTER_SHELL" "$adapter_file" "$@"
+      ACTANARA_INSTALL_SOURCE_ROOT= \
+      ACTANARA_INSTALL_SOURCE_URL= \
+      ACTANARA_INSTALL_REF= \
+      ACTANARA_INSTALL_PUBLIC_ENTRY=1 \
+        "$ADAPTER_SHELL" "$adapter_file" "$@"
     else
-      "$ADAPTER_SHELL" "$adapter_file" "$@"
+      ACTANARA_INSTALL_SOURCE_ROOT= \
+      ACTANARA_INSTALL_SOURCE_URL= \
+      ACTANARA_INSTALL_REF= \
+        "$ADAPTER_SHELL" "$adapter_file" "$@"
     fi
     return $?
   fi
@@ -240,10 +322,18 @@ run_platform_adapter() {
   download_exact_adapter
   adapter_file="$DOWNLOADED_ADAPTER"
   if [ "$ADAPTER_PATH" = "install/bootstrap-linux.sh" ]; then
-    ACTANARA_INSTALL_PUBLIC_ENTRY=1 "$ADAPTER_SHELL" "$adapter_file" \
-      --source-url "$SOURCE_URL" --ref "$SOURCE_REF" "$@"
+    ACTANARA_INSTALL_SOURCE_ROOT= \
+    ACTANARA_INSTALL_SOURCE_URL= \
+    ACTANARA_INSTALL_REF= \
+    ACTANARA_INSTALL_PUBLIC_ENTRY=1 \
+      "$ADAPTER_SHELL" "$adapter_file" --source-url "$SOURCE_URL" \
+      --ref "$SOURCE_REF" "$@"
   else
-    "$ADAPTER_SHELL" "$adapter_file" --source-url "$SOURCE_URL" --ref "$SOURCE_REF" "$@"
+    ACTANARA_INSTALL_SOURCE_ROOT= \
+    ACTANARA_INSTALL_SOURCE_URL= \
+    ACTANARA_INSTALL_REF= \
+      "$ADAPTER_SHELL" "$adapter_file" --source-url "$SOURCE_URL" \
+      --ref "$SOURCE_REF" "$@"
   fi
 }
 

@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 os.environ["ACTANARA_SECRET_BACKEND"] = "memory"
+TEST_STABLE_RELEASE_COMMIT = "d" * 40
 
 
 def _load_cli_module():
@@ -19,6 +20,7 @@ def _load_cli_module():
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
     spec.loader.exec_module(module)
+    module.resolve_latest_stable_commit = lambda **_kwargs: TEST_STABLE_RELEASE_COMMIT
     return module
 
 
@@ -509,6 +511,7 @@ class ActanaraCliTests(unittest.TestCase):
         with (
             patch.object(cli, "load_paths", return_value=type("Paths", (), {"home": Path("/tmp/actanara")})()),
             patch.object(cli, "read_settings", return_value={}),
+            patch.object(cli, "resolve_latest_stable_commit") as resolve,
             patch.object(cli.subprocess, "run") as run,
             redirect_stdout(io.StringIO()) as output,
         ):
@@ -542,6 +545,7 @@ class ActanaraCliTests(unittest.TestCase):
         self.assertIsNone(payload["plannedDependenciesInstall"])
         self.assertFalse(payload["resultAvailable"])
         self.assertEqual(payload["stage"], "plan")
+        resolve.assert_not_called()
         run.assert_not_called()
 
     def test_update_help_describes_latest_stable_release_commit_pinning(self):
@@ -580,6 +584,11 @@ class ActanaraCliTests(unittest.TestCase):
         with (
             patch.object(cli, "load_paths", return_value=type("Paths", (), {"home": Path("/tmp/actanara")})()),
             patch.object(cli, "read_settings", return_value={}),
+            patch.object(
+                cli,
+                "resolve_latest_stable_commit",
+                return_value=TEST_STABLE_RELEASE_COMMIT,
+            ) as resolve,
             patch.object(cli.shutil, "which", return_value="/bin/zsh"),
             patch.object(cli.subprocess, "run", return_value=completed) as run,
             redirect_stdout(io.StringIO()) as output,
@@ -589,8 +598,15 @@ class ActanaraCliTests(unittest.TestCase):
         payload = json.loads(output.getvalue())
         self.assertEqual(code, 0)
         self.assertEqual(payload["status"], "completed")
+        resolve.assert_called_once_with(
+            source_url=cli.DEFAULT_UPDATE_SOURCE_URL,
+        )
         command = run.call_args.args[0]
         self.assertIn("--dry-run", command)
+        self.assertEqual(
+            command[command.index("--ref") + 1],
+            TEST_STABLE_RELEASE_COMMIT,
+        )
         self.assertIn("--upgrade", command)
         self.assertIn("--runtime", command)
         self.assertIn("/tmp/actanara", command)
@@ -607,6 +623,110 @@ class ActanaraCliTests(unittest.TestCase):
         self.assertEqual(payload["reason"], "active dependency manifest missing")
         self.assertTrue(payload["resultAvailable"])
         self.assertEqual(payload["stage"], "preflight")
+        self.assertEqual(payload["ref"], TEST_STABLE_RELEASE_COMMIT)
+        self.assertEqual(
+            payload["sourceSelection"]["resolvedCommit"],
+            TEST_STABLE_RELEASE_COMMIT,
+        )
+        self.assertEqual(payload["sourceSelection"]["resolvedBy"], "operator-cli")
+
+    def test_update_dry_run_without_installer_envelope_reports_source_plan_only(self):
+        cli = _load_cli_module()
+        completed = type(
+            "Completed",
+            (),
+            {
+                "returncode": 0,
+                "stdout": "immutable source selected\n",
+                "stderr": "",
+            },
+        )()
+        common_patches = (
+            patch.object(
+                cli,
+                "load_paths",
+                return_value=type(
+                    "Paths",
+                    (),
+                    {"home": Path("/tmp/actanara")},
+                )(),
+            ),
+            patch.object(cli, "read_settings", return_value={}),
+            patch.object(cli.shutil, "which", return_value="/bin/zsh"),
+            patch.object(cli.subprocess, "run", return_value=completed),
+        )
+        with (
+            common_patches[0],
+            common_patches[1],
+            common_patches[2],
+            common_patches[3],
+            redirect_stdout(io.StringIO()) as output,
+        ):
+            code = cli.main(
+                ["update", "--dry-run", "--ref", "a" * 40, "--json"]
+            )
+
+        payload = json.loads(output.getvalue())
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["status"], "completed")
+        self.assertFalse(payload["resultAvailable"])
+        self.assertEqual(payload["stage"], "source-plan")
+        self.assertIn("preflight were not checked", payload["reason"])
+        self.assertIsNone(payload["sourceUpdated"])
+
+        with (
+            patch.object(
+                cli,
+                "load_paths",
+                return_value=type(
+                    "Paths",
+                    (),
+                    {"home": Path("/tmp/actanara")},
+                )(),
+            ),
+            patch.object(cli, "read_settings", return_value={}),
+            patch.object(cli.shutil, "which", return_value="/bin/zsh"),
+            patch.object(cli.subprocess, "run", return_value=completed),
+            redirect_stdout(io.StringIO()) as human_output,
+        ):
+            human_code = cli.main(
+                ["update", "--dry-run", "--ref", "a" * 40]
+            )
+
+        rendered = human_output.getvalue()
+        self.assertEqual(human_code, 0)
+        self.assertIn("Update preview complete", rendered)
+        self.assertIn("candidate installer preflight were not checked", rendered)
+        self.assertNotIn("Actanara is up to date", rendered)
+
+    def test_update_release_resolution_failure_never_starts_bootstrap(self):
+        cli = _load_cli_module()
+        with (
+            patch.object(
+                cli,
+                "load_paths",
+                return_value=type(
+                    "Paths",
+                    (),
+                    {"home": Path("/tmp/actanara")},
+                )(),
+            ),
+            patch.object(
+                cli,
+                "resolve_latest_stable_commit",
+                side_effect=ValueError("latest Release is unavailable"),
+            ) as resolve,
+            patch.object(cli.subprocess, "run") as run,
+            redirect_stderr(io.StringIO()) as error,
+        ):
+            code = cli.main(["update", "--dry-run"])
+
+        self.assertEqual(code, 2)
+        resolve.assert_called_once_with(
+            source_url=cli.DEFAULT_UPDATE_SOURCE_URL,
+        )
+        run.assert_not_called()
+        self.assertIn("latest Release is unavailable", error.getvalue())
 
     def test_update_apply_json_reports_actual_installer_reuse_result(self):
         cli = _load_cli_module()
@@ -648,7 +768,7 @@ class ActanaraCliTests(unittest.TestCase):
         payload = json.loads(output.getvalue())
         policy = payload["mutationPolicy"]
         self.assertEqual(code, 0)
-        self.assertNotIn("env", run.call_args.kwargs)
+        self.assertIn("env", run.call_args.kwargs)
         self.assertFalse(policy["dependenciesInstalled"])
         self.assertTrue(policy["sourceUpdated"])
         self.assertTrue(policy["managedServicesStoppedAfterPreflight"])
@@ -721,7 +841,7 @@ class ActanaraCliTests(unittest.TestCase):
         self.assertIn("--source-only", command[separator + 1 :])
         self.assertIn("--result-json", command[separator + 1 :])
 
-    def test_linux_remote_update_clears_ambient_bootstrap_source_selection(self):
+    def test_remote_update_clears_ambient_bootstrap_selection_on_both_platforms(self):
         cli = _load_cli_module()
         completed = type(
             "Completed",
@@ -736,26 +856,41 @@ class ActanaraCliTests(unittest.TestCase):
             "ACTANARA_INSTALL_SOURCE_ROOT": "/tmp/adjacent-checkout",
             "ACTANARA_INSTALL_SOURCE_URL": "https://example.invalid/ambient.git",
             "ACTANARA_INSTALL_REF": "b" * 40,
+            "ACTANARA_INSTALL_DRY_RUN": "0",
+            "ACTANARA_INSTALL_OFFLINE": "1",
         }
-        with (
-            patch.dict(os.environ, ambient, clear=False),
-            patch.object(cli.platform, "system", return_value="Linux"),
-            patch.object(cli, "load_paths", return_value=type("Paths", (), {"home": Path("/tmp/actanara")})()),
-            patch.object(cli, "read_settings", return_value={}),
-            patch.object(cli.shutil, "which", return_value="/bin/sh"),
-            patch.object(cli.subprocess, "run", return_value=completed) as run,
-            redirect_stdout(io.StringIO()),
-        ):
-            code = cli.main(["update", "--dry-run", "--ref", "a" * 40, "--json"])
+        for platform_name, shell in (("Darwin", "/bin/zsh"), ("Linux", "/bin/sh")):
+            with (
+                self.subTest(platform=platform_name),
+                patch.dict(os.environ, ambient, clear=False),
+                patch.object(cli.platform, "system", return_value=platform_name),
+                patch.object(
+                    cli,
+                    "load_paths",
+                    return_value=type(
+                        "Paths",
+                        (),
+                        {"home": Path("/tmp/actanara")},
+                    )(),
+                ),
+                patch.object(cli, "read_settings", return_value={}),
+                patch.object(cli, "resolve_latest_stable_commit") as resolve,
+                patch.object(cli.shutil, "which", return_value=shell),
+                patch.object(cli.subprocess, "run", return_value=completed) as run,
+                redirect_stdout(io.StringIO()),
+            ):
+                code = cli.main(
+                    ["update", "--dry-run", "--ref", "a" * 40, "--json"]
+                )
 
-        self.assertEqual(code, 0)
-        environment = run.call_args.kwargs["env"]
-        self.assertNotIn("ACTANARA_INSTALL_SOURCE_ROOT", environment)
-        self.assertNotIn("ACTANARA_INSTALL_SOURCE_URL", environment)
-        self.assertNotIn("ACTANARA_INSTALL_REF", environment)
-        command = run.call_args.args[0]
-        self.assertIn("--source-url", command)
-        self.assertEqual(command[command.index("--ref") + 1], "a" * 40)
+            self.assertEqual(code, 0)
+            resolve.assert_not_called()
+            environment = run.call_args.kwargs["env"]
+            for name in ambient:
+                self.assertNotIn(name, environment)
+            command = run.call_args.args[0]
+            self.assertIn("--source-url", command)
+            self.assertEqual(command[command.index("--ref") + 1], "a" * 40)
 
     def test_update_source_only_and_force_rebuild_are_mutually_exclusive(self):
         cli = _load_cli_module()

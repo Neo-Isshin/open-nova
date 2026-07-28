@@ -50,14 +50,14 @@ class LicenseMetadataTests(unittest.TestCase):
                 self.assertIn("`MIT`", content)
                 self.assertIn("](LICENSE)", content)
 
-    def test_public_entrypoints_use_the_shared_main_setup_channel(self):
+    def test_public_entrypoints_use_the_stable_release_asset(self):
         install_command = (
-            "curl -fsSL https://raw.githubusercontent.com/Neo-Isshin/actanara/"
-            "main/install/setup.sh | sh"
+            "curl -fsSL https://github.com/Neo-Isshin/actanara/"
+            "releases/latest/download/install.sh | sh"
         )
-        obsolete_release_command = (
-            "https://github.com/Neo-Isshin/actanara/"
-            "releases/latest/download/install.sh"
+        mutable_main_command = (
+            "https://raw.githubusercontent.com/Neo-Isshin/actanara/"
+            "main/install/setup.sh"
         )
         for name in (
             "README.md",
@@ -65,12 +65,13 @@ class LicenseMetadataTests(unittest.TestCase):
             "docs/local-operations-runbook.md",
             "docs/local-operations-runbook.zh-CN.md",
             "docs/new-user-onboarding-runbook.md",
+            "docs/new-user-onboarding-runbook.zh-CN.md",
             "docs/index.html",
         ):
             with self.subTest(name=name):
                 content = (ROOT / name).read_text(encoding="utf-8")
                 self.assertIn(install_command, content)
-                self.assertNotIn(obsolete_release_command, content)
+                self.assertNotIn(mutable_main_command, content)
                 self.assertNotIn("raw.githubusercontent.com/Neo-Isshin/actanara/v1.0.1", content)
                 self.assertNotIn("git" + "ea", content.lower())
 

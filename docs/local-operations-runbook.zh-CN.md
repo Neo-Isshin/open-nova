@@ -20,7 +20,7 @@ README 负责解释产品和快速开始；本 Runbook 负责从安装前检查�
 
 - GitHub 是唯一公开发布与安装来源；任何私有开发归档都不属于公开安装链路。
 - 已发布的 tag、Release 和 artifacts 保持不可变。
-- 公开 one-liner 从 `main` 获取 POSIX setup 入口，再将官方 `origin/main` 解析为精确完整源码 commit，并从同一 commit 选择平台适配器。
+- 公开 one-liner 从最新稳定且不可变的 Release 下载 POSIX setup 入口；该产物已固定到 Release 的精确完整源码 commit，并从同一 commit 选择平台适配器。
 - `v1.0.0` 已撤回，只保留用于审计，不应继续安装或推荐。
 
 > [!IMPORTANT]
@@ -53,23 +53,23 @@ macOS 保留现有引导式设置。Linux 使用非交互模式，支持全新�
 arm64 使用独立锁目标，但不维护两套应用实现；受保护更新/修复门禁已在
 Debian x86_64、CPython 3.13 上验证。
 
-## 4. 从 main 最新 commit 安装或刷新
+## 4. 从最新稳定 Release 安装或刷新
 
 使用公开 one-liner：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Neo-Isshin/actanara/main/install/setup.sh | sh
+curl -fsSL https://github.com/Neo-Isshin/actanara/releases/latest/download/install.sh | sh
 ```
 
 这条命令在隐藏源码获取细节的同时固定实际安装版本：
 
-1. GitHub 从 `main` 提供持续维护的 POSIX setup 入口；
-2. 入口将官方 `origin/main` 解析为完整 commit；
+1. GitHub 从最新稳定且不可变的 Release 提供 POSIX setup 入口；
+2. Release 构建器把入口固定到该 Release 的完整源码 commit；
 3. 从同一 commit 获取 macOS 或 Linux 适配器；
 4. 适配器安装相同的 detached commit。
 
 > [!NOTE]
-> 公开入口会跟随 `main`，但每次执行都会记录并安装一个精确 commit，而不是移动中的符号引用。
+> 公开安装跟随不可变 Release tag，而不是移动中的开发分支。高级与离线场景仍可显式使用 `--source-root` 或完整 `--ref`。
 
 > [!WARNING]
 > 两个平台上的同一条命令都支持全新和已有 Runtime，并保留用户 Settings、
@@ -320,7 +320,7 @@ actanara update --apply
 - `--dry-run` 会运行 bootstrap 和安装器预演，并说明复用现有 venv 还是按锁重建；远端源码冷缓存时仍可能只能展示源码获取计划；
 - 只有 `--apply` 会执行真实更新事务。
 
-安装器与 updater 使用所选 `main` commit 中相同的 dependency contract 与精确 Runtime lock。默认更新会在依赖、Python ABI、启用 profile 与 venv 内实际安装**完全一致**时复用 active venv（只切换源码指针，不运行 pip）；否则从带 hash 校验的 lock 构建独立候选 venv，验证通过才原子切换，绝不在 active venv 中原地安装。证据缺失或不明确时保守失败，不会冒险猜测依赖选择。
+安装器与 updater 使用所选 Release 或源码 commit 中相同的 dependency contract 与精确 Runtime lock。默认更新会在依赖、Python ABI、启用 profile 与 venv 内实际安装**完全一致**时复用 active venv（只切换源码指针，不运行 pip）；否则从带 hash 校验的 lock 构建独立候选 venv，验证通过才原子切换，绝不在 active venv 中原地安装。证据缺失或不明确时保守失败，不会冒险猜测依赖选择。
 
 ```bash
 actanara update --apply --offline --ref <full-commit-sha>        # 使用已缓存远端 commit

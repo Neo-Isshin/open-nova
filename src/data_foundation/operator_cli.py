@@ -29,6 +29,7 @@ from data_foundation.llm_provider_test import check_llm_provider_availability
 from data_foundation.nova_task import diary_tasks_snapshot, pending_candidate_count
 from data_foundation.paths import default_oneliner_runtime_home, initialize_home, load_paths, runtime_paths_for_home
 from data_foundation.pipeline import run_daily_pipeline
+from data_foundation.release_source import resolve_latest_stable_commit
 from data_foundation.scheduler_reconcile import reconcile_pipeline_schedule
 from data_foundation.onboarding_plan import (
     dump_onboarding_approval_packet_json,
@@ -907,12 +908,24 @@ def _update_run(args: argparse.Namespace) -> int:
     try:
         _validate_update_source_selection(args)
         paths = _paths_from_args(args) or load_paths()
-        command = _update_bootstrap_command(args, paths.home)
+        should_execute = bool(args.apply or args.dry_run)
+        resolved_release_ref = None
+        if should_execute and not args.source_root and not args.ref:
+            resolved_release_ref = resolve_latest_stable_commit(
+                source_url=str(args.source_url or DEFAULT_UPDATE_SOURCE_URL),
+            )
+        command = _update_bootstrap_command(
+            args,
+            paths.home,
+            resolved_release_ref=resolved_release_ref,
+        )
     except (FileNotFoundError, ValueError) as exc:
         sys.stderr.write(f"Error: {_friendly_update_start_error(exc)}\nTry: actanara update --help\n")
         return 2
-    should_execute = bool(args.apply or args.dry_run)
-    source_selection = _update_source_selection(args)
+    source_selection = _update_source_selection(
+        args,
+        resolved_release_ref=resolved_release_ref,
+    )
     payload = {
         "status": "ready" if not should_execute else "running",
         "dryRun": bool(args.dry_run),
@@ -921,7 +934,7 @@ def _update_run(args: argparse.Namespace) -> int:
         "runtime": str(paths.home),
         "sourceUrl": None if args.source_root else args.source_url,
         "sourceRoot": args.source_root,
-        "ref": args.ref,
+        "ref": args.ref or resolved_release_ref,
         "sourceSelection": source_selection,
         "command": command,
         "updateMode": "not-evaluated",
@@ -973,21 +986,31 @@ def _update_run(args: argparse.Namespace) -> int:
                 fields=(("Status", "Previewing" if args.dry_run else "Installing"), ("Data folder", paths.home)),
             )
         )
-    run_kwargs = {"text": True, "capture_output": True, "check": False}
-    if platform.system() == "Linux":
-        environment = os.environ.copy()
-        for name in (
-            "ACTANARA_INSTALL_SOURCE_ROOT",
-            "ACTANARA_INSTALL_SOURCE_URL",
-            "ACTANARA_INSTALL_REF",
-        ):
-            environment.pop(name, None)
-        run_kwargs["env"] = environment
+    environment = os.environ.copy()
+    for name in (
+        "ACTANARA_INSTALL_SOURCE_ROOT",
+        "ACTANARA_INSTALL_SOURCE_URL",
+        "ACTANARA_INSTALL_REF",
+        "ACTANARA_INSTALL_DRY_RUN",
+        "ACTANARA_INSTALL_OFFLINE",
+    ):
+        environment.pop(name, None)
+    run_kwargs = {
+        "text": True,
+        "capture_output": True,
+        "check": False,
+        "env": environment,
+    }
     result = subprocess.run(command, **run_kwargs)
     stdout = getattr(result, "stdout", "") or ""
     stderr = getattr(result, "stderr", "") or ""
     envelope = _update_result_envelope(stdout)
-    _apply_update_execution_result(payload, envelope, result.returncode)
+    _apply_update_execution_result(
+        payload,
+        envelope,
+        result.returncode,
+        dry_run=bool(args.dry_run),
+    )
     payload["stdout"] = stdout
     payload["stderr"] = stderr
 
@@ -1008,7 +1031,12 @@ def _update_run(args: argparse.Namespace) -> int:
     return result.returncode
 
 
-def _update_bootstrap_command(args: argparse.Namespace, runtime_home: Path) -> list[str]:
+def _update_bootstrap_command(
+    args: argparse.Namespace,
+    runtime_home: Path,
+    *,
+    resolved_release_ref: str | None = None,
+) -> list[str]:
     _validate_update_source_selection(args)
     bootstrap = _update_bootstrap_path(args, runtime_home)
     linux = platform.system() == "Linux"
@@ -1026,8 +1054,9 @@ def _update_bootstrap_command(args: argparse.Namespace, runtime_home: Path) -> l
         command.extend(["--source-root", str(Path(args.source_root).expanduser())])
     else:
         command.extend(["--source-url", str(args.source_url or DEFAULT_UPDATE_SOURCE_URL)])
-    if args.ref:
-        command.extend(["--ref", str(args.ref)])
+    selected_ref = args.ref or resolved_release_ref
+    if selected_ref:
+        command.extend(["--ref", str(selected_ref)])
     if args.cache_root:
         command.extend(["--cache-root", str(Path(args.cache_root).expanduser())])
     if linux:
@@ -1133,7 +1162,13 @@ def _update_result_text(envelope: dict, field: str) -> str | None:
     return value if isinstance(value, str) and value.strip() else None
 
 
-def _apply_update_execution_result(payload: dict, envelope: dict | None, returncode: int) -> None:
+def _apply_update_execution_result(
+    payload: dict,
+    envelope: dict | None,
+    returncode: int,
+    *,
+    dry_run: bool = False,
+) -> None:
     payload["status"] = "completed" if returncode == 0 else "failed"
     payload["returncode"] = returncode
     if envelope is None:
@@ -1149,10 +1184,18 @@ def _apply_update_execution_result(payload: dict, envelope: dict | None, returnc
                 "rollbackComplete": None,
                 "stateCertain": None,
                 "resultAvailable": False,
-                "stage": "bootstrap" if returncode else "bootstrap-completed-without-result",
+                "stage": (
+                    "bootstrap"
+                    if returncode
+                    else "source-plan"
+                    if dry_run
+                    else "bootstrap-completed-without-result"
+                ),
                 "reason": (
                     f"bootstrap failed with exit status {returncode} without a valid installer result envelope"
                     if returncode
+                    else "immutable source plan completed; commit availability and candidate installer preflight were not checked"
+                    if dry_run
                     else "bootstrap completed without a valid installer result envelope"
                 ),
             }
@@ -1223,6 +1266,21 @@ def _update_output_without_result_envelopes(stdout: str) -> str:
 def _write_update_human_result(payload: dict, returncode: int) -> None:
     target = sys.stdout if returncode == 0 else sys.stderr
     if returncode == 0:
+        if payload.get("dryRun") is True:
+            result = (
+                "The update plan was checked; no update was applied."
+                if payload.get("resultAvailable") is True
+                else "The immutable source was planned; commit availability and candidate installer preflight were not checked."
+            )
+            target.write(
+                render_cli(
+                    "Update preview complete",
+                    fields=(("Status", "No changes applied"),),
+                    sections=(("Result", (result,)),),
+                    next_steps=("actanara update --apply",),
+                )
+            )
+            return
         target.write(
             render_cli(
                 "Update complete",
@@ -1281,7 +1339,11 @@ def _validate_update_source_selection(args: argparse.Namespace) -> None:
         )
 
 
-def _update_source_selection(args: argparse.Namespace) -> dict:
+def _update_source_selection(
+    args: argparse.Namespace,
+    *,
+    resolved_release_ref: str | None = None,
+) -> dict:
     if args.source_root:
         return {
             "mode": "local-source-root",
@@ -1297,12 +1359,15 @@ def _update_source_selection(args: argparse.Namespace) -> dict:
             "commitPinnedByBootstrap": True,
             "requestedCommit": str(args.ref),
         }
-    return {
+    payload = {
         "mode": "latest-stable-release",
         "policy": LATEST_STABLE_RELEASE_POLICY,
-        "resolvedBy": "bootstrap",
+        "resolvedBy": "operator-cli" if resolved_release_ref else "operator-cli-at-execution",
         "commitPinnedByBootstrap": True,
     }
+    if resolved_release_ref:
+        payload["resolvedCommit"] = resolved_release_ref
+    return payload
 
 
 def _update_preserved_installer_args(runtime_home: Path) -> list[str]:

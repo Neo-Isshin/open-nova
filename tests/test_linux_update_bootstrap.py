@@ -56,6 +56,10 @@ class LinuxUpdateBootstrapTests(unittest.TestCase):
         self._git("commit", "--quiet", "-m", "first", cwd=work)
         first = self._git("rev-parse", "HEAD", cwd=work).stdout.strip()
         (work / "selected-commit.txt").write_text("second\n", encoding="utf-8")
+        (work / "install" / "install_linux.py").write_text(
+            "# fixture Linux installer from second commit\n",
+            encoding="utf-8",
+        )
         self._git("add", ".", cwd=work)
         self._git("commit", "--quiet", "-m", "second", cwd=work)
         second = self._git("rev-parse", "HEAD", cwd=work).stdout.strip()
@@ -467,6 +471,78 @@ class LinuxUpdateBootstrapTests(unittest.TestCase):
         self.assertNotEqual(first, second)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(deployed, first)
+        self.assertEqual(len(invocations), 1)
+
+    def test_cache_git_isolation_ignores_replace_worktree_fsmonitor_and_ambient_git(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "Home").mkdir()
+            origin, first, second = self._origin_fixture(root)
+            python, python_log = self._fake_python(root)
+            cache = root / "Cache"
+            source = cache / "source"
+            self._git("clone", "--quiet", origin.as_uri(), str(source), cwd=root)
+
+            external_worktree = root / "external-worktree"
+            external_worktree.mkdir()
+            sentinel = external_worktree / "operator-owned.txt"
+            sentinel.write_text("preserve\n", encoding="utf-8")
+            fsmonitor_marker = root / "fsmonitor-ran"
+            fsmonitor = root / "fsmonitor"
+            fsmonitor.write_text(
+                "#!/bin/sh\n"
+                f"printf ran > {fsmonitor_marker}\n"
+                "exit 0\n",
+                encoding="utf-8",
+            )
+            fsmonitor.chmod(0o755)
+            self._git("config", "core.worktree", str(external_worktree), cwd=source)
+            self._git("config", "core.fsmonitor", str(fsmonitor), cwd=source)
+            self._git("replace", first, second, cwd=source)
+
+            ambient_git_dir = root / "ambient.git"
+            self._git(
+                "init",
+                "--bare",
+                "--quiet",
+                str(ambient_git_dir),
+                cwd=root,
+            )
+            env = self._environment(
+                root,
+                python_log,
+                GIT_DIR=str(ambient_git_dir),
+                GIT_WORK_TREE=str(external_worktree),
+                GIT_CONFIG_COUNT="1",
+                GIT_CONFIG_KEY_0="protocol.ext.allow",
+                GIT_CONFIG_VALUE_0="always",
+            )
+            result = self._run(
+                root,
+                "--source-url",
+                origin.as_uri(),
+                "--ref",
+                first,
+                "--cache-root",
+                str(cache),
+                "--python",
+                str(python),
+                "--",
+                "--dry-run",
+                env=env,
+                streamed=True,
+            )
+            installer_payload = (
+                source / "install" / "install_linux.py"
+            ).read_text(encoding="utf-8")
+            invocations = self._python_invocations(python_log)
+            sentinel_payload = sentinel.read_text(encoding="utf-8")
+            fsmonitor_ran = fsmonitor_marker.exists()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(installer_payload, "# fixture Linux installer\n")
+        self.assertEqual(sentinel_payload, "preserve\n")
+        self.assertFalse(fsmonitor_ran)
         self.assertEqual(len(invocations), 1)
 
     def test_verified_cache_removes_untracked_payload_before_exact_ref_install(self):

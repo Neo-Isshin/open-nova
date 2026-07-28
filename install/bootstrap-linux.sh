@@ -61,20 +61,62 @@ is_full_commit_id() {
   [ "${#value}" -eq 40 ] || [ "${#value}" -eq 64 ]
 }
 
-git_exec() {
+git_exec() (
+  unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE
+  unset GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES
+  unset GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT
+  unset GIT_CEILING_DIRECTORIES GIT_DISCOVERY_ACROSS_FILESYSTEM GIT_PREFIX
+  unset GIT_ALLOW_PROTOCOL GIT_PROTOCOL_FROM_USER GIT_EXEC_PATH GIT_TEMPLATE_DIR
+  unset GIT_SSH GIT_SSH_COMMAND
   if [ "$OFFLINE" = "1" ]; then
     GIT_NO_LAZY_FETCH=1 \
     GIT_ALLOW_PROTOCOL= \
+    GIT_NO_REPLACE_OBJECTS=1 \
     GIT_TERMINAL_PROMPT=0 \
     GIT_CONFIG_NOSYSTEM=1 \
     GIT_CONFIG_GLOBAL=/dev/null \
-      "$GIT_BIN" -c protocol.allow=never -c core.hooksPath=/dev/null "$@"
+      "$GIT_BIN" \
+        -c protocol.allow=never \
+        -c protocol.ext.allow=never \
+        -c core.hooksPath=/dev/null \
+        -c core.fsmonitor=false \
+        "$@"
     return $?
   fi
+  GIT_NO_REPLACE_OBJECTS=1 \
   GIT_TERMINAL_PROMPT=0 \
   GIT_CONFIG_NOSYSTEM=1 \
   GIT_CONFIG_GLOBAL=/dev/null \
-    "$GIT_BIN" -c core.hooksPath=/dev/null "$@"
+    "$GIT_BIN" \
+      -c protocol.ext.allow=never \
+      -c core.hooksPath=/dev/null \
+      -c core.fsmonitor=false \
+      "$@"
+)
+
+cache_git_exec() (
+  cache_git_root="$1"
+  shift
+  git_exec \
+    --git-dir="$cache_git_root/.git" \
+    --work-tree="$cache_git_root" \
+    "$@"
+)
+
+validate_cache_layout() {
+  source="$1"
+  if [ ! -d "$source" ] || [ -L "$source" ] || [ ! -d "$source/.git" ] || [ -L "$source/.git" ]; then
+    bootstrap_error "installer cache layout is unsafe"
+    return 2
+  fi
+  physical_source=$(CDPATH= cd -- "$source" 2>/dev/null && pwd -P) || {
+    bootstrap_error "installer cache layout could not be resolved"
+    return 2
+  }
+  if [ "$physical_source" != "$source" ]; then
+    bootstrap_error "installer cache source escaped the selected cache root"
+    return 2
+  fi
 }
 
 canonical_source_url() {
@@ -97,7 +139,8 @@ source_urls_match() {
 validate_cached_origin() {
   source="$1"
   requested="$2"
-  existing=$(git_exec -C "$source" remote get-url origin 2>/dev/null || true)
+  validate_cache_layout "$source" || return $?
+  existing=$(cache_git_exec "$source" remote get-url origin 2>/dev/null || true)
   if [ -z "$existing" ] || ! source_urls_match "$existing" "$requested"; then
     bootstrap_error "installer cache origin does not match the requested source URL"
     return 2
@@ -492,6 +535,8 @@ if [ -z "$SOURCE_ROOT" ]; then
       bootstrap_error "a custom source URL requires an exact 40- or 64-character commit"
       exit 2
     fi
+    bootstrap_error "network setup requires a Release-pinned installer or an exact commit"
+    exit 2
   elif ! is_full_commit_id "$SOURCE_REF"; then
     bootstrap_error "the selected source ref must be an exact 40- or 64-character commit"
     exit 2
@@ -500,6 +545,18 @@ if [ -z "$SOURCE_ROOT" ]; then
   fi
 
   CACHE_SOURCE=1
+  if [ ! -d "$CACHE_ROOT" ]; then
+    if [ "$OFFLINE" = "1" ]; then
+      bootstrap_error "offline installer cache is missing: $CACHE_ROOT"
+      exit 2
+    fi
+    mkdir -p "$CACHE_ROOT"
+  fi
+  normalized_cache_root=$(CDPATH= cd -- "$CACHE_ROOT" 2>/dev/null && pwd -P) || {
+    bootstrap_error "installer cache root is unavailable or unsafe: $CACHE_ROOT"
+    exit 2
+  }
+  CACHE_ROOT="$normalized_cache_root"
   SOURCE_ROOT="$CACHE_ROOT/source"
   if [ -e "$SOURCE_ROOT" ] && [ ! -d "$SOURCE_ROOT/.git" ]; then
     bootstrap_error "installer cache exists but is not a Git checkout"
@@ -514,28 +571,21 @@ if [ -z "$SOURCE_ROOT" ]; then
     bootstrap_error "offline installer cache is missing: $SOURCE_ROOT"
     exit 2
   else
-    mkdir -p "$CACHE_ROOT"
     if ! git_exec clone --filter=blob:none --sparse --no-checkout "$SOURCE_URL" "$SOURCE_ROOT"; then
       bootstrap_error "could not clone the selected source URL"
       exit 2
     fi
-    git_exec -C "$SOURCE_ROOT" sparse-checkout init --no-cone
-    git_exec -C "$SOURCE_ROOT" sparse-checkout set /pyproject.toml /MANIFEST.in /LICENSE /config.py /install /advanced /src
+    cache_git_exec "$SOURCE_ROOT" sparse-checkout init --no-cone
+    cache_git_exec "$SOURCE_ROOT" sparse-checkout set /pyproject.toml /MANIFEST.in /LICENSE /config.py /install /advanced /src
     validate_cached_origin "$SOURCE_ROOT" "$SOURCE_URL" || exit $?
   fi
 
-  if [ -z "$SOURCE_REF" ]; then
-    if ! git_exec -C "$SOURCE_ROOT" fetch --force origin '+refs/heads/main:refs/remotes/origin/main'; then
-      bootstrap_error "could not resolve the selected source main branch"
-      exit 2
-    fi
-    SOURCE_REF=$(git_exec -C "$SOURCE_ROOT" rev-parse --verify 'refs/remotes/origin/main^{commit}' 2>/dev/null || true)
-  elif [ "$OFFLINE" != "1" ]; then
-    if ! git_exec -C "$SOURCE_ROOT" fetch --force origin "$SOURCE_REF"; then
+  if [ "$OFFLINE" != "1" ]; then
+    if ! cache_git_exec "$SOURCE_ROOT" fetch --force origin "$SOURCE_REF"; then
       bootstrap_error "the selected source ref is unavailable from the requested origin"
       exit 2
     fi
-    fetched_ref=$(git_exec -C "$SOURCE_ROOT" rev-parse --verify 'FETCH_HEAD^{commit}' 2>/dev/null || true)
+    fetched_ref=$(cache_git_exec "$SOURCE_ROOT" rev-parse --verify 'FETCH_HEAD^{commit}' 2>/dev/null || true)
     fetched_ref=$(printf '%s' "$fetched_ref" | tr '[:upper:]' '[:lower:]')
     if [ "$fetched_ref" != "$SOURCE_REF" ]; then
       bootstrap_error "the requested origin did not resolve the exact selected commit"
@@ -547,19 +597,19 @@ if [ -z "$SOURCE_ROOT" ]; then
     exit 2
   fi
   SOURCE_REF=$(printf '%s' "$SOURCE_REF" | tr '[:upper:]' '[:lower:]')
-  resolved_ref=$(git_exec -C "$SOURCE_ROOT" rev-parse --verify "$SOURCE_REF^{commit}" 2>/dev/null || true)
+  resolved_ref=$(cache_git_exec "$SOURCE_ROOT" rev-parse --verify "$SOURCE_REF^{commit}" 2>/dev/null || true)
   resolved_ref=$(printf '%s' "$resolved_ref" | tr '[:upper:]' '[:lower:]')
   if [ "$resolved_ref" != "$SOURCE_REF" ]; then
     bootstrap_error "the cached source does not match the selected commit"
     exit 2
   fi
-  git_exec -C "$SOURCE_ROOT" checkout --detach "$SOURCE_REF"
-  git_exec -C "$SOURCE_ROOT" reset --hard "$SOURCE_REF"
+  cache_git_exec "$SOURCE_ROOT" checkout --detach "$SOURCE_REF"
+  cache_git_exec "$SOURCE_ROOT" reset --hard "$SOURCE_REF"
   # The cache is installer-owned. Remove both ignored and ordinary untracked
   # files so the payload is exactly the requested commit, not a commit plus
   # stale cache content.
-  git_exec -C "$SOURCE_ROOT" clean -fdx
-  deployed_ref=$(git_exec -C "$SOURCE_ROOT" rev-parse --verify 'HEAD^{commit}' 2>/dev/null || true)
+  cache_git_exec "$SOURCE_ROOT" clean -fdx --
+  deployed_ref=$(cache_git_exec "$SOURCE_ROOT" rev-parse --verify 'HEAD^{commit}' 2>/dev/null || true)
   deployed_ref=$(printf '%s' "$deployed_ref" | tr '[:upper:]' '[:lower:]')
   if [ "$deployed_ref" != "$SOURCE_REF" ]; then
     bootstrap_error "the installer cache did not deploy the exact selected commit"

@@ -587,6 +587,21 @@ class UpdateTransactionTests(unittest.TestCase):
             calls_path,
         )
 
+    def _unloaded_darwin_launchctl(
+        self,
+        fixture: dict[str, Path],
+    ) -> str:
+        root = fixture["runtime"].parents[1]
+        state_dir = root / "darwin-repair-launchctl-state"
+        state_dir.mkdir(exist_ok=True)
+        fake_launchctl = root / "darwin-repair-launchctl"
+        self._write_stateful_fake_launchctl(
+            fake_launchctl,
+            state_dir=state_dir,
+            calls_path=root / "darwin-repair-launchctl-calls.log",
+        )
+        return str(fake_launchctl)
+
     def _begin_only_result(
         self,
         fixture: dict[str, Path],
@@ -842,10 +857,15 @@ class UpdateTransactionTests(unittest.TestCase):
     def _commit_repair_transaction(
         self,
         fixture: dict[str, Path],
+        *,
+        platform: str = "Linux",
+        launchctl: str = "/usr/bin/true",
     ) -> Path:
         journal = self._begin(
             fixture,
             owner_pid=os.getpid(),
+            platform=platform,
+            launchctl=launchctl,
             mode="repair",
             settings_only_profile_evidence=True,
         )
@@ -858,6 +878,56 @@ class UpdateTransactionTests(unittest.TestCase):
         self._run("promote", "--state", str(journal))
         self._run("commit-repair", "--state", str(journal))
         return journal
+
+    def test_darwin_pending_repair_allows_a_guarded_successor_repair(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = self._fixture(Path(tmp))
+            launchctl = self._unloaded_darwin_launchctl(fixture)
+            journal = self._commit_repair_transaction(
+                fixture,
+                platform="Darwin",
+                launchctl=launchctl,
+            )
+            lock = fixture["runtime"] / "app" / ".update-transaction.lock"
+            marker = fixture["runtime"] / "app" / ".repair-configuration-pending"
+
+            self.assertTrue(marker.exists())
+            self.assertFalse(lock.exists())
+            retry = self._begin_only_result(
+                fixture,
+                mode="repair",
+                platform="Darwin",
+                launchctl=launchctl,
+                tx_id="successor-repair",
+            )
+
+            self.assertEqual(retry.returncode, 0, retry.stdout + retry.stderr)
+            successor = Path(retry.stdout.strip())
+            self.assertTrue(successor.is_file())
+            self._run("rollback", "--state", str(successor))
+            self._run("complete-repair", "--state", str(journal))
+
+    def test_darwin_pending_repair_still_blocks_a_nonrepair_update(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = self._fixture(Path(tmp))
+            launchctl = self._unloaded_darwin_launchctl(fixture)
+            journal = self._commit_repair_transaction(
+                fixture,
+                platform="Darwin",
+                launchctl=launchctl,
+            )
+
+            retry = self._begin_only_result(
+                fixture,
+                mode="upgrade",
+                platform="Darwin",
+                launchctl=launchctl,
+                tx_id="unsafe-upgrade",
+            )
+
+            self.assertEqual(retry.returncode, 70, retry.stdout + retry.stderr)
+            self.assertIn("committed Runtime repair is pending", retry.stderr)
+            self._run("complete-repair", "--state", str(journal))
 
     def test_begin_preserves_preexisting_reserved_artifact(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -4645,13 +4715,17 @@ print -r -- "$reserved"
             repair_backups = Path(state["repairBackupPath"])
             self.assertTrue(repair_backups.is_dir())
             self.assertTrue(any(repair_backups.iterdir()))
-            self.assertTrue(
-                (fixture["runtime"] / "app" / ".update-transaction.lock").exists()
+            transaction_lock = (
+                fixture["runtime"] / "app" / ".update-transaction.lock"
             )
+            pending_marker = (
+                fixture["runtime"] / "app" / ".repair-configuration-pending"
+            )
+            self.assertFalse(transaction_lock.exists())
+            self.assertTrue(pending_marker.is_file())
             self._run("complete-repair", "--state", str(journal))
-            self.assertFalse(
-                (fixture["runtime"] / "app" / ".update-transaction.lock").exists()
-            )
+            self.assertFalse(transaction_lock.exists())
+            self.assertFalse(pending_marker.exists())
 
     def test_repair_pending_marker_lifecycle_is_bound_to_transaction(self):
         with tempfile.TemporaryDirectory() as tmp:

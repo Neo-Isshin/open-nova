@@ -20,7 +20,7 @@ In this guide, an **agent runtime** means an AI tool environment with its own se
 
 - GitHub is the only public release and installation source. Private development archives are not part of the public installation path.
 - Published tags, Releases, and artifacts remain immutable.
-- The public one-liner fetches the POSIX setup entrypoint from `main`, then resolves official `origin/main` to an exact full source commit and selects the platform adapter from that commit.
+- The public one-liner downloads the POSIX setup entrypoint from the latest stable immutable Release. The asset is pinned to that Release's exact full source commit and selects the platform adapter from the same commit.
 - `v1.0.0` has been withdrawn and remains available for audit only. It should not be installed or recommended.
 
 > [!IMPORTANT]
@@ -54,23 +54,23 @@ RAG. The Linux installer supports separate x86_64 and arm64 lock targets without
 maintaining separate application implementations; the guarded update/repair
 release gate is verified on Debian x86_64 with CPython 3.13.
 
-## 4. Install or Refresh from the Latest Main Commit
+## 4. Install or Refresh from the Latest Stable Release
 
 Use the public one-liner:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Neo-Isshin/actanara/main/install/setup.sh | sh
+curl -fsSL https://github.com/Neo-Isshin/actanara/releases/latest/download/install.sh | sh
 ```
 
 The command keeps source selection exact while hiding source plumbing from the user:
 
-1. GitHub serves the maintained POSIX setup entrypoint from `main`;
-2. The entrypoint resolves official `origin/main` to a full commit;
+1. GitHub serves the POSIX setup entrypoint from the latest stable immutable Release;
+2. The Release builder pins that entrypoint to the Release's full source commit;
 3. It fetches the macOS or Linux adapter from that exact commit;
 4. The adapter installs the same detached commit.
 
 > [!NOTE]
-> The entrypoint follows `main`, but each run records and installs one exact commit rather than a moving symbolic ref.
+> Published installation follows immutable Release tags, not a moving development branch. Explicit `--source-root` or full `--ref` selection remains available for advanced and offline workflows.
 
 > [!WARNING]
 > On both platforms the same command supports new and existing Runtimes and
@@ -327,7 +327,7 @@ actanara update --apply
 - Only `--apply` performs the real update transaction.
 
 The installer and updater use the same dependency contract and exact Runtime lock
-from the selected `main` commit. The default apply reuses the active venv only
+from the selected Release or source commit. The default apply reuses the active venv only
 when dependencies, Python ABI, enabled profiles, and the live venv contents **all
 match**—it switches the source pointer without running pip; otherwise it builds a
 separate candidate venv from the hash-verified lock and atomically switches

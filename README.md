@@ -64,12 +64,13 @@ Actanara breaks down those barriers: work completed in Claude Code can be found 
 ## Install Actanara
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Neo-Isshin/actanara/main/install/setup.sh | sh
+curl -fsSL https://github.com/Neo-Isshin/actanara/releases/latest/download/install.sh | sh
 ```
 
-This is the shared macOS/Linux entrypoint and requires no `sudo`. It resolves
-the current official `main` to an exact commit before dispatching to the
-platform adapter. macOS keeps its guided fresh-install and update behavior;
+This is the shared macOS/Linux entrypoint and requires no `sudo`. GitHub serves
+it from the latest stable immutable Release; the asset is pinned to that
+Release's exact source commit before dispatching to the platform adapter.
+macOS keeps its guided fresh-install and update behavior;
 Linux supports guarded fresh install, source-only refresh, locked dependency
 upgrade, and confirmed repair of an existing Runtime. Linux update
 transactions preserve the prior systemd user-unit state and fail closed on
@@ -106,7 +107,7 @@ covered by the real-host functional gate.
 
 | Capability | Linux behavior |
 | :--- | :--- |
-| **Install and update** | The public `setup.sh` entrypoint supports guarded fresh install, exact-ref/source-only update, locked dependency upgrade, and explicit repair. Fresh generations are staged and promoted atomically; failures leave the previous Runtime recoverable. |
+| **Install and update** | The public Release `install.sh` entrypoint supports guarded fresh install, exact-ref/source-only update, locked dependency upgrade, and explicit repair. Fresh generations are staged and promoted atomically; failures leave the previous Runtime recoverable. |
 | **User boundary and services** | Run `setup.sh` as a regular login user, not through `sudo`. Actanara does not invoke `sudo`; Dashboard, optional `nova-RAG`, and scheduled jobs run as user-level systemd units controlled through `systemctl --user`. |
 | **RAG readiness** | Fresh install can enable the audited CPU-only local profile using `intfloat/multilingual-e5-small` at 384 dimensions. Fresh managed cloud RAG fails closed until a credential-backed provider profile exists. Installation reports success only after the managed listener, source commit, provider profile, model, and health response agree. |
 | **Ports and headless hosts** | Dashboard and RAG bind loopback by default on ports 3036 and 3037. On a headless host, forward the configured Dashboard port over SSH and use the same local port so browser Origin checks remain valid. |

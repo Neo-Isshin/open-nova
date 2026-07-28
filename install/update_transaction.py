@@ -4301,9 +4301,14 @@ def begin(args: argparse.Namespace) -> int:
     except FileNotFoundError:
         pass
     else:
-        raise TransactionError(
-            "a committed Runtime repair is pending; resume its existing journal"
-        )
+        # Linux retains the committed repair lock and resumes the same journal
+        # under its inherited Runtime mutation guard.  The existing macOS
+        # installer instead performs a guarded successor repair transaction,
+        # snapshotting and replacing this marker before final configuration.
+        if args.platform != "Darwin" or args.mode != "repair":
+            raise TransactionError(
+                "a committed Runtime repair is pending; resume its existing journal"
+            )
     tx_root = runtime / "app" / "update-transactions"
     os.chmod(tx_root, 0o700)
     lock = runtime / "app" / ".update-transaction.lock"
@@ -5977,6 +5982,8 @@ def commit_repair(args: argparse.Namespace) -> int:
     state["status"] = "committed"
     _save_state(state_path, state, event="repair-committed-services-stopped")
     _maybe_test_fail("repair-commit-journaled-before-lock-release")
+    if state["platform"] == "Darwin":
+        _release_lock(state)
     return 0
 
 
@@ -6193,7 +6200,8 @@ def recover(args: argparse.Namespace) -> int:
         if Path(state["runtime"]).resolve(strict=False) != runtime.resolve(strict=False):
             raise TransactionError("stale update lock journal belongs to a different Runtime")
         repair_configuration_live = (
-            state.get("mode") == "repair"
+            state.get("platform") == "Linux"
+            and state.get("mode") == "repair"
             and state.get("status") == "committed"
             and state.get("repairConfigurationComplete") is not True
         )

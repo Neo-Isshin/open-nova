@@ -64,11 +64,12 @@ Actanara 打通这些壁垒：让 Claude Code 完成的工作能被 Codex 找到
 ## 安装 Actanara
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Neo-Isshin/actanara/main/install/setup.sh | sh
+curl -fsSL https://github.com/Neo-Isshin/actanara/releases/latest/download/install.sh | sh
 ```
 
-这是 macOS 与 Linux 共用的公开入口，无需 `sudo`。它先把官方 `main`
-解析为精确 commit，再分派到对应平台适配器。macOS 保持原有的引导式
+这是 macOS 与 Linux 共用的公开入口，无需 `sudo`。GitHub 从最新稳定且
+不可变的 Release 提供该入口；产物已固定到该 Release 的精确源码 commit，
+再分派到对应平台适配器。macOS 保持原有的引导式
 全新安装与更新行为；Linux 支持受保护的全新安装、仅源码刷新、按锁升级，
 以及经明确确认的已有 Runtime 修复。Linux 更新事务会保持原有 systemd
 user unit 状态，遇到定义漂移或非 Actanara unit 时保守失败。第一次了解 Actanara？可以先体验
@@ -100,7 +101,7 @@ CPython 3.13 与 systemd 257 上执行；依赖锁也提供 arm64 目标，而�
 
 | 能力 | Linux 行为 |
 | :--- | :--- |
-| **安装与更新** | 公开 `setup.sh` 入口支持受保护的全新安装、精确 ref/仅源码更新、按锁依赖升级和显式修复。新 generation 先在 staging 中构建再原子提升；失败后旧 Runtime 仍可恢复。 |
+| **安装与更新** | 公开的 Release `install.sh` 入口支持受保护的全新安装、精确 ref/仅源码更新、按锁依赖升级和显式修复。新 generation 先在 staging 中构建再原子提升；失败后旧 Runtime 仍可恢复。 |
 | **用户边界与服务** | 请以普通登录用户运行 `setup.sh`，不要通过 `sudo` 启动。Actanara 自身不会调用 `sudo`；Dashboard、可选 `nova-RAG` 与调度任务使用由 `systemctl --user` 控制的用户级 systemd unit。 |
 | **RAG readiness** | 全新安装可启用经审计的 CPU-only 本地 profile，使用 384 维的 `intfloat/multilingual-e5-small`。credential-backed Provider 尚未配置时，fresh managed cloud RAG 会保守拒绝。安装器只有在受管 listener、source commit、provider profile、模型与健康响应全部一致后才报告成功。 |
 | **端口与无桌面主机** | Dashboard 与 RAG 默认只监听 loopback 的 3036 与 3037。无桌面主机应通过 SSH 转发已配置的 Dashboard 端口，并让本地端口保持一致，以满足浏览器 Origin 检查。 |

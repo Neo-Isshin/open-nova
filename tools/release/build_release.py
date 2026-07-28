@@ -35,8 +35,9 @@ AGGREGATE_ALGORITHM = (
 )
 PAYLOAD_ROOT_FILES = frozenset({"LICENSE", "MANIFEST.in", "config.py", "pyproject.toml"})
 PAYLOAD_DIRECTORIES = frozenset({"advanced", "install", "src"})
-STABLE_INSTALL_SOURCE = "install/bootstrap.sh"
+STABLE_INSTALL_SOURCE = "install/setup.sh"
 STABLE_INSTALL_ASSET = "install.sh"
+STABLE_INSTALL_REF_ANCHOR = b'SOURCE_REF="${ACTANARA_INSTALL_REF:-}"'
 ALLOWED_GIT_MODES = frozenset({"100644", "100755", "120000"})
 VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:[A-Za-z0-9._+-]*)?$")
 FULL_COMMIT_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
@@ -940,7 +941,7 @@ def build_stable_install_asset(
     *,
     source_date_epoch: int,
 ) -> Path:
-    """Publish the audited hosted bootstrap under a version-neutral asset name."""
+    """Publish a cross-platform setup entrypoint pinned to this release."""
 
     matches = [item for item in source.entries if item.path == STABLE_INSTALL_SOURCE]
     if len(matches) != 1:
@@ -949,14 +950,27 @@ def build_stable_install_asset(
     if entry.mode != "100755" or entry.symlink_broken:
         raise ReleaseBuildError("stable install bootstrap must be a regular executable file")
     payload = _verify_entry(source.root, entry)
-    if not payload.startswith(b"#!/usr/bin/env zsh\n") or b"\0" in payload:
-        raise ReleaseBuildError("stable install bootstrap has an invalid executable format")
+    if not payload.startswith(b"#!/bin/sh\n") or b"\0" in payload:
+        raise ReleaseBuildError("stable install entrypoint has an invalid executable format")
     if (
         b"if true; then\n" not in payload
         or not payload.endswith(b"fi\n")
-        or b"resolve_official_main_commit" not in payload
+        or b"select_platform_adapter" not in payload
+        or b'ADAPTER_PATH="install/bootstrap.sh"' not in payload
+        or b'ADAPTER_PATH="install/bootstrap-linux.sh"' not in payload
+        or b"download_exact_adapter" not in payload
     ):
-        raise ReleaseBuildError("stable install bootstrap is missing its hosted-stream safety contract")
+        raise ReleaseBuildError(
+            "stable install entrypoint is missing its cross-platform hosted-stream contract"
+        )
+    if payload.count(STABLE_INSTALL_REF_ANCHOR) != 1:
+        raise ReleaseBuildError(
+            "stable install entrypoint must contain exactly one release-ref anchor"
+        )
+    pinned_ref = (
+        f'SOURCE_REF="${{ACTANARA_INSTALL_REF:-{source.commit}}}"'.encode("ascii")
+    )
+    payload = payload.replace(STABLE_INSTALL_REF_ANCHOR, pinned_ref, 1)
     target = output_directory / STABLE_INSTALL_ASSET
     target.write_bytes(payload)
     target.chmod(0o755)

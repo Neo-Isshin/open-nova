@@ -33,12 +33,13 @@ in `~/.config/actanara/location.json`.
 Run the public installer:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Neo-Isshin/actanara/main/install/setup.sh | sh
+curl -fsSL https://github.com/Neo-Isshin/actanara/releases/latest/download/install.sh | sh
 ```
 
-GitHub serves the maintained POSIX entrypoint from `main`. It resolves official
-`origin/main` to a full commit, downloads the platform adapter from that exact
-commit, then invokes the existing macOS installer or the Linux installer.
+GitHub serves the POSIX entrypoint from the latest stable immutable Release.
+The asset is pinned to that Release's full source commit, downloads the
+platform adapter from the same commit, then invokes the macOS or Linux
+installer.
 
 On macOS, the hosted entrypoint supports both new and existing Runtimes and
 retains the established update/repair transaction. Linux supports fresh install,

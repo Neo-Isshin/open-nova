@@ -80,6 +80,23 @@ def _init_repository(root: Path, *, version: str = "7.8.9") -> str:
         encoding="utf-8",
     )
     bootstrap.chmod(0o755)
+    linux_bootstrap = root / "install" / "bootstrap-linux.sh"
+    linux_bootstrap.write_text("#!/bin/sh\nif true; then\nexit 0\nfi\n", encoding="utf-8")
+    linux_bootstrap.chmod(0o755)
+    setup = root / "install" / "setup.sh"
+    setup.write_text(
+        "#!/bin/sh\n"
+        "if true; then\n"
+        'SOURCE_REF="${ACTANARA_INSTALL_REF:-}"\n'
+        "select_platform_adapter() {\n"
+        '  ADAPTER_PATH="install/bootstrap.sh"\n'
+        '  ADAPTER_PATH="install/bootstrap-linux.sh"\n'
+        "}\n"
+        "download_exact_adapter() { return 0; }\n"
+        "fi\n",
+        encoding="utf-8",
+    )
+    setup.chmod(0o755)
     (root / "install" / "dependency_contract.py").write_text(
         'PRODUCT = "actanara"\n',
         encoding="utf-8",
@@ -610,7 +627,23 @@ class ReleaseArtifactBuilderTests(unittest.TestCase):
             self.assertIn(b"install.sh", first_files["SHA256SUMS"])
             self.assertEqual(
                 first_files["install.sh"],
-                (source / "install" / "bootstrap.sh").read_bytes(),
+                (source / "install" / "setup.sh")
+                .read_bytes()
+                .replace(
+                    release_builder.STABLE_INSTALL_REF_ANCHOR,
+                    (
+                        f'SOURCE_REF="${{ACTANARA_INSTALL_REF:-{commit}}}"'
+                    ).encode("ascii"),
+                    1,
+                ),
+            )
+            self.assertIn(
+                f'SOURCE_REF="${{ACTANARA_INSTALL_REF:-{commit}}}"'.encode("ascii"),
+                first_files["install.sh"],
+            )
+            self.assertNotIn(
+                release_builder.STABLE_INSTALL_REF_ANCHOR,
+                first_files["install.sh"],
             )
             self.assertEqual(int((outputs[0] / "install.sh").stat().st_mtime), 1783900800)
             self.assertEqual((outputs[0] / "install.sh").stat().st_mode & 0o777, 0o755)
@@ -645,10 +678,14 @@ class ReleaseArtifactBuilderTests(unittest.TestCase):
             runtime_archive = outputs[0] / "actanara-7.8.9-runtime.tar.gz"
             with tarfile.open(runtime_archive, "r:gz") as archive:
                 runtime_members = {member.name for member in archive.getmembers()}
-                archived_bootstrap = archive.extractfile(
-                    "actanara-7.8.9/install/bootstrap.sh"
+                archived_setup = archive.extractfile(
+                    "actanara-7.8.9/install/setup.sh"
                 ).read()
-            self.assertEqual(first_files["install.sh"], archived_bootstrap)
+            self.assertIn(
+                release_builder.STABLE_INSTALL_REF_ANCHOR,
+                archived_setup,
+            )
+            self.assertNotEqual(first_files["install.sh"], archived_setup)
             self.assertIn(
                 "actanara-7.8.9/install/dependency_contract.py",
                 runtime_members,
@@ -724,6 +761,68 @@ class ReleaseArtifactBuilderTests(unittest.TestCase):
                     root / "changed-output",
                     source_date_epoch=1783900800,
                 )
+
+    def test_stable_install_asset_rejects_invalid_or_ambiguous_cross_platform_entrypoint(self):
+        valid_body = (
+            "if true; then\n"
+            'SOURCE_REF="${ACTANARA_INSTALL_REF:-}"\n'
+            "select_platform_adapter() {\n"
+            '  ADAPTER_PATH="install/bootstrap.sh"\n'
+            '  ADAPTER_PATH="install/bootstrap-linux.sh"\n'
+            "}\n"
+            "download_exact_adapter() { return 0; }\n"
+            "fi\n"
+        )
+        cases = (
+            ("#!/usr/bin/env zsh\n" + valid_body, "invalid executable format"),
+            (
+                "#!/bin/sh\n"
+                + valid_body.replace(
+                    'SOURCE_REF="${ACTANARA_INSTALL_REF:-}"\n',
+                    "",
+                ),
+                "exactly one release-ref anchor",
+            ),
+            (
+                "#!/bin/sh\n"
+                + valid_body.replace(
+                    'SOURCE_REF="${ACTANARA_INSTALL_REF:-}"\n',
+                    'SOURCE_REF="${ACTANARA_INSTALL_REF:-}"\n'
+                    'SOURCE_REF="${ACTANARA_INSTALL_REF:-}"\n',
+                ),
+                "exactly one release-ref anchor",
+            ),
+            (
+                "#!/bin/sh\n"
+                + valid_body.replace(
+                    '  ADAPTER_PATH="install/bootstrap-linux.sh"\n',
+                    "",
+                ),
+                "cross-platform hosted-stream contract",
+            ),
+        )
+        for payload, expected_error in cases:
+            with self.subTest(expected_error=expected_error), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                source_root = root / "source"
+                source_root.mkdir()
+                _init_repository(source_root)
+                setup = source_root / release_builder.STABLE_INSTALL_SOURCE
+                setup.write_text(payload, encoding="utf-8")
+                setup.chmod(0o755)
+                _git(source_root, "add", release_builder.STABLE_INSTALL_SOURCE)
+                _git(source_root, "commit", "-q", "-m", "mutate setup")
+                source = release_builder.inspect_frozen_git_source(source_root)
+
+                with self.assertRaisesRegex(
+                    release_builder.ReleaseBuildError,
+                    expected_error,
+                ):
+                    release_builder.build_stable_install_asset(
+                        source,
+                        root / "output",
+                        source_date_epoch=1783900800,
+                    )
 
     def test_source_date_epoch_is_explicit_and_validated(self):
         with mock.patch.dict(os.environ, {}, clear=True):

@@ -29,12 +29,12 @@
 运行公开安装器：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Neo-Isshin/actanara/main/install/setup.sh | sh
+curl -fsSL https://github.com/Neo-Isshin/actanara/releases/latest/download/install.sh | sh
 ```
 
-GitHub 从 `main` 提供持续维护的 POSIX 入口。它把官方 `origin/main`
-解析为完整 commit，从同一 commit 获取平台适配器，再调用既有 macOS
-安装器或 Linux 安装器。
+GitHub 从最新稳定且不可变的 Release 提供 POSIX 入口。该产物已固定到
+Release 的完整源码 commit，从同一 commit 获取平台适配器，再调用既有
+macOS 安装器或 Linux 安装器。
 
 macOS 入口同时支持新建和已有 Runtime，并保留原有更新/修复事务。Linux
 支持全新安装、仅源码刷新、自动或强制按锁重建 venv，以及经明确确认的

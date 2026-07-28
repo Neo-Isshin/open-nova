@@ -2,6 +2,7 @@ import errno
 import json
 import os
 import pty
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -45,6 +46,19 @@ print -r -- "$*" >> "$ACTANARA_TEST_INSTALL_LOG"
             """#!/usr/bin/env zsh
 set -eu
 print -r -- "$*" >> "$ACTANARA_TEST_GIT_LOG"
+while [[ "$#" -gt 0 ]]; do
+  case "${1:-}" in
+    -c)
+      shift 2
+      ;;
+    --git-dir=*|--work-tree=*)
+      shift
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
 if [[ "${1:-}" == "clone" ]]; then
   target="${@: -1}"
   mkdir -p "$target/.git" "$target/install"
@@ -52,19 +66,15 @@ if [[ "${1:-}" == "clone" ]]; then
   chmod +x "$target/install/install.sh"
   exit 0
 fi
-if [[ "${1:-}" == "-C" && "${3:-}" == "remote" && "${4:-}" == "get-url" ]]; then
+if [[ "${1:-}" == "remote" && "${2:-}" == "get-url" ]]; then
   print -r -- "${ACTANARA_TEST_SOURCE_URL}"
   exit 0
 fi
-if [[ "${1:-}" == "-C" && "${3:-}" == "rev-parse" ]]; then
+if [[ "${1:-}" == "rev-parse" ]]; then
   if [[ "${ACTANARA_TEST_REV_PARSE_FAIL:-0}" == "1" ]]; then
     exit 1
   fi
   print -r -- "${ACTANARA_TEST_REV_PARSE_COMMIT:-${ACTANARA_TEST_COMMIT}}"
-  exit 0
-fi
-if [[ "${1:-}" == "ls-remote" ]]; then
-  print -r -- "${ACTANARA_TEST_COMMIT}\trefs/heads/main"
   exit 0
 fi
 exit 0
@@ -72,6 +82,47 @@ exit 0
             encoding="utf-8",
         )
         self.fake_git.chmod(0o755)
+
+    def _git(self, *arguments: str, cwd: Path) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [shutil.which("git") or "git", *arguments],
+            cwd=cwd,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+
+    def _origin_fixture(self) -> tuple[Path, str, str]:
+        work = self.root / "origin-work"
+        origin = self.root / "origin.git"
+        (work / "install").mkdir(parents=True)
+        installer = work / "install" / "install.sh"
+        installer.write_text(
+            "#!/usr/bin/env zsh\n"
+            'print -r -- "SAFE $*" >> "$ACTANARA_TEST_INSTALL_LOG"\n',
+            encoding="utf-8",
+        )
+        installer.chmod(0o755)
+        for name, value in (
+            ("user.name", "Actanara Test"),
+            ("user.email", "actanara-test@example.invalid"),
+        ):
+            if name == "user.name":
+                self._git("init", "--quiet", cwd=work)
+            self._git("config", name, value, cwd=work)
+        self._git("add", ".", cwd=work)
+        self._git("commit", "--quiet", "-m", "safe", cwd=work)
+        safe = self._git("rev-parse", "HEAD", cwd=work).stdout.strip()
+        installer.write_text(
+            "#!/usr/bin/env zsh\n"
+            'print -r -- "EVIL $*" >> "$ACTANARA_TEST_INSTALL_LOG"\n',
+            encoding="utf-8",
+        )
+        self._git("add", ".", cwd=work)
+        self._git("commit", "--quiet", "-m", "evil", cwd=work)
+        evil = self._git("rev-parse", "HEAD", cwd=work).stdout.strip()
+        self._git("clone", "--quiet", "--bare", str(work), str(origin), cwd=self.root)
+        return origin, safe, evil
 
     def _environment(self, **overrides: str) -> dict[str, str]:
         env = os.environ.copy()
@@ -209,7 +260,9 @@ exit 0
         script = BOOTSTRAP.read_text(encoding="utf-8")
 
         self.assertIn(f'DEFAULT_SOURCE_URL="{DEFAULT_SOURCE_URL}"', script)
-        self.assertIn("refs/remotes/origin/main^{commit}", script)
+        self.assertIn("Release-pinned installer or an exact version ID", script)
+        self.assertNotIn("refs/heads/main", script)
+        self.assertNotIn("refs/remotes/origin/main", script)
         self.assertNotIn("releases/latest", script)
         self.assertNotIn("git" + "ea", script.lower())
 
@@ -234,62 +287,77 @@ exit 0
         self.assertFalse(self.git_log.exists())
         self.assertFalse(self.install_log.exists())
 
-    def test_default_remote_resolves_and_detaches_exact_origin_main_commit(self) -> None:
-        result = self._run(*self._remote_arguments())
+    def test_explicit_remote_commit_is_checked_out_detached(self) -> None:
+        result = self._run(*self._remote_arguments(ref=COMMIT))
         output = self._output(result)
         git_log = self.git_log.read_text(encoding="utf-8")
 
         self.assertEqual(result.returncode, 0, output)
         self.assertIn("clone --filter=blob:none --sparse --no-checkout", git_log)
-        self.assertIn(
-            "fetch --force origin +refs/heads/main:refs/remotes/origin/main",
-            git_log,
-        )
-        self.assertIn("rev-parse --verify refs/remotes/origin/main^{commit}", git_log)
+        self.assertIn(f"rev-parse --verify {COMMIT}^{{commit}}", git_log)
         self.assertIn(f"checkout --detach {COMMIT}", git_log)
         self.assertIn(f"reset --hard {COMMIT}", git_log)
         self.assertNotIn("origin/HEAD", git_log)
+        self.assertNotIn("refs/heads/main", git_log)
+        self.assertNotIn("refs/remotes/origin/main", git_log)
         self.assertNotIn("refs/tags/", git_log)
-        self.assertIn("已获取最新版本", output)
         self.assertTrue(self.install_log.is_file())
         installer_args = self.install_log.read_text(encoding="utf-8").split()
         self.assertNotIn("--upgrade", installer_args)
         self.assertNotIn("--yes", installer_args)
 
-    def test_default_origin_main_must_resolve_to_a_full_commit(self) -> None:
-        cases = (
-            {"ACTANARA_TEST_REV_PARSE_FAIL": "1"},
-            {"ACTANARA_TEST_REV_PARSE_COMMIT": "main"},
+    def test_remote_without_release_pin_fails_before_cache_or_git(self) -> None:
+        result = self._run(*self._remote_arguments())
+
+        self.assertEqual(result.returncode, 2, self._output(result))
+        self.assertIn(
+            "network setup requires a Release-pinned installer or an exact version ID",
+            self._output(result),
         )
-        for index, overrides in enumerate(cases):
-            with self.subTest(index=index):
-                cache = self.root / f"invalid-main-cache-{index}"
-                arguments = self._remote_arguments()
-                arguments[arguments.index(str(self.cache))] = str(cache)
-                self.git_log.unlink(missing_ok=True)
-                result = self._run(*arguments, env=self._environment(**overrides))
+        self.assertFalse(self.cache.exists())
+        self.assertFalse(self.git_log.exists())
+        self.assertFalse(self.install_log.exists())
 
-                self.assertEqual(result.returncode, 2, self._output(result))
-                self.assertIn("origin/main did not resolve to an exact commit", self._output(result))
-                self.assertIn(
-                    "rev-parse --verify refs/remotes/origin/main^{commit}",
-                    self.git_log.read_text(encoding="utf-8"),
-                )
-                self.assertFalse(self.install_log.exists())
-
-    def test_default_remote_dry_run_resolves_main_without_creating_cache(self) -> None:
-        arguments = self._remote_arguments()
+    def test_explicit_remote_dry_run_uses_commit_without_creating_cache(self) -> None:
+        arguments = self._remote_arguments(ref=COMMIT)
         arguments.insert(0, "--dry-run")
 
         result = self._run(*arguments)
 
         self.assertEqual(result.returncode, 0, self._output(result))
-        git_log = self.git_log.read_text(encoding="utf-8")
         self.assertIn(
-            f"ls-remote --exit-code {DEFAULT_SOURCE_URL} refs/heads/main",
-            git_log,
+            f"Dry-run planned immutable source commit {COMMIT}",
+            self._output(result),
         )
         self.assertFalse(self.cache.exists())
+        self.assertFalse(self.git_log.exists())
+        self.assertFalse(self.install_log.exists())
+
+    def test_remote_dry_run_never_executes_a_warm_cache_worktree(self) -> None:
+        source = self.cache / "source"
+        (source / ".git").mkdir(parents=True)
+        (source / "install").mkdir()
+        tampered_marker = self.root / "tampered-ran"
+        (source / "install" / "install.sh").write_text(
+            "#!/usr/bin/env zsh\n"
+            f"print -r -- tampered > {tampered_marker}\n"
+            "exit 91\n",
+            encoding="utf-8",
+        )
+        arguments = self._remote_arguments(ref=OTHER_COMMIT)
+        arguments.insert(0, "--dry-run")
+
+        result = self._run(
+            *arguments,
+            env=self._environment(ACTANARA_TEST_COMMIT=COMMIT),
+        )
+
+        self.assertEqual(result.returncode, 0, self._output(result))
+        self.assertIn(
+            f"Dry-run planned immutable source commit {OTHER_COMMIT}",
+            self._output(result),
+        )
+        self.assertFalse(tampered_marker.exists())
         self.assertFalse(self.install_log.exists())
 
     def test_hosted_stdin_bootstrap_never_adopts_the_current_checkout(self) -> None:
@@ -305,6 +373,8 @@ exit 0
                 "-c",
                 script,
                 "actanara-hosted-bootstrap",
+                "--ref",
+                COMMIT,
                 "--",
                 "--runtime",
                 str(self.root / "runtime"),
@@ -322,8 +392,10 @@ exit 0
         git_log = self.git_log.read_text(encoding="utf-8")
         self.assertIn("clone --filter=blob:none --sparse --no-checkout", git_log)
         self.assertIn(DEFAULT_SOURCE_URL, git_log)
-        self.assertIn("rev-parse --verify refs/remotes/origin/main^{commit}", git_log)
+        self.assertIn(f"rev-parse --verify {COMMIT}^{{commit}}", git_log)
         self.assertIn(f"checkout --detach {COMMIT}", git_log)
+        self.assertNotIn("refs/heads/main", git_log)
+        self.assertNotIn("refs/remotes/origin/main", git_log)
         self.assertNotIn(str(ROOT / "install" / "install.sh"), self.install_log.read_text(encoding="utf-8"))
 
     def test_offline_without_ref_still_fails_before_cache_write(self) -> None:
@@ -337,7 +409,7 @@ exit 0
         self.assertFalse(self.cache.exists())
         self.assertFalse(self.git_log.exists())
 
-    def test_official_url_forms_without_ref_follow_main(self) -> None:
+    def test_official_url_forms_without_ref_fail_before_source_writes(self) -> None:
         source_urls = (
             "https://github.com/Neo-Isshin/actanara",
             "https://github.com/Neo-Isshin/actanara/",
@@ -345,7 +417,7 @@ exit 0
         )
         for index, source_url in enumerate(source_urls):
             with self.subTest(source_url=source_url):
-                cache = self.root / f"official-main-cache-{index}"
+                cache = self.root / f"official-release-cache-{index}"
                 arguments = self._remote_arguments(source_url=source_url)
                 arguments[arguments.index(str(self.cache))] = str(cache)
                 self.git_log.unlink(missing_ok=True)
@@ -353,10 +425,14 @@ exit 0
 
                 result = self._run(*arguments)
 
-                self.assertEqual(result.returncode, 0, self._output(result))
-                git_log = self.git_log.read_text(encoding="utf-8")
-                self.assertIn("rev-parse --verify refs/remotes/origin/main^{commit}", git_log)
-                self.assertIn(f"checkout --detach {COMMIT}", git_log)
+                self.assertEqual(result.returncode, 2, self._output(result))
+                self.assertIn(
+                    "network setup requires a Release-pinned installer or an exact version ID",
+                    self._output(result),
+                )
+                self.assertFalse(cache.exists())
+                self.assertFalse(self.git_log.exists())
+                self.assertFalse(self.install_log.exists())
 
     def test_custom_remote_without_commit_and_symbolic_remote_ref_fail_closed(self) -> None:
         cases = (
@@ -394,7 +470,7 @@ exit 0
         shutil_installer.chmod(0o755)
 
         result = self._run(
-            *self._remote_arguments(),
+            *self._remote_arguments(ref=COMMIT),
             env=self._environment(
                 ACTANARA_TEST_SOURCE_URL="https://github.com/Neo-Isshin/actanara"
             ),
@@ -402,14 +478,77 @@ exit 0
 
         self.assertEqual(result.returncode, 0, self._output(result))
         git_log = self.git_log.read_text(encoding="utf-8")
-        self.assertLess(
-            git_log.index(
-                "fetch --force origin +refs/heads/main:refs/remotes/origin/main"
-            ),
-            git_log.index("rev-parse --verify refs/remotes/origin/main^{commit}"),
-        )
+        self.assertIn(f"fetch --force origin {COMMIT}", git_log)
+        self.assertIn("rev-parse --verify FETCH_HEAD^{commit}", git_log)
+        self.assertIn(f"rev-parse --verify {COMMIT}^{{commit}}", git_log)
         self.assertIn(f"checkout --detach {COMMIT}", git_log)
+        self.assertIn("clean -fdx", git_log)
+        self.assertNotIn("fetch --all", git_log)
+        self.assertNotIn("refs/heads/main", git_log)
+        self.assertNotIn("refs/remotes/origin/main", git_log)
         self.assertTrue(self.install_log.is_file())
+
+    def test_cache_git_isolation_ignores_replace_worktree_fsmonitor_and_ambient_git(self) -> None:
+        origin, safe, evil = self._origin_fixture()
+        source = self.cache / "source"
+        self._git("clone", "--quiet", origin.as_uri(), str(source), cwd=self.root)
+        external_worktree = self.root / "external-worktree"
+        external_worktree.mkdir()
+        sentinel = external_worktree / "operator-owned.txt"
+        sentinel.write_text("preserve\n", encoding="utf-8")
+        fsmonitor_marker = self.root / "fsmonitor-ran"
+        fsmonitor = self.root / "fsmonitor"
+        fsmonitor.write_text(
+            "#!/bin/sh\n"
+            f"printf ran > {fsmonitor_marker}\n"
+            "exit 0\n",
+            encoding="utf-8",
+        )
+        fsmonitor.chmod(0o755)
+        self._git("config", "core.worktree", str(external_worktree), cwd=source)
+        self._git("config", "core.fsmonitor", str(fsmonitor), cwd=source)
+        self._git("replace", safe, evil, cwd=source)
+        ambient_git_dir = self.root / "ambient.git"
+        self._git(
+            "init",
+            "--bare",
+            "--quiet",
+            str(ambient_git_dir),
+            cwd=self.root,
+        )
+        arguments = self._remote_arguments(source_url=origin.as_uri(), ref=safe)
+        arguments[arguments.index(str(self.fake_git))] = shutil.which("git") or "git"
+        result = self._run(
+            *arguments,
+            env=self._environment(
+                ACTANARA_TEST_SOURCE_URL=origin.as_uri(),
+                GIT_DIR=str(ambient_git_dir),
+                GIT_WORK_TREE=str(external_worktree),
+                GIT_CONFIG_COUNT="1",
+                GIT_CONFIG_KEY_0="protocol.ext.allow",
+                GIT_CONFIG_VALUE_0="always",
+            ),
+        )
+
+        self.assertEqual(result.returncode, 0, self._output(result))
+        self.assertEqual(sentinel.read_text(encoding="utf-8"), "preserve\n")
+        self.assertFalse(fsmonitor_marker.exists())
+        self.assertTrue(self.install_log.is_file())
+        self.assertTrue(self.install_log.read_text(encoding="utf-8").startswith("SAFE "))
+
+    def test_symlinked_cache_git_directory_is_rejected_before_git_or_installer(self) -> None:
+        source = self.cache / "source"
+        source.mkdir(parents=True)
+        external_git = self.root / "external.git"
+        external_git.mkdir()
+        (source / ".git").symlink_to(external_git, target_is_directory=True)
+
+        result = self._run(*self._remote_arguments(ref=COMMIT))
+
+        self.assertEqual(result.returncode, 2, self._output(result))
+        self.assertIn("cache layout is unsafe", self._output(result))
+        self.assertFalse(self.git_log.exists())
+        self.assertFalse(self.install_log.exists())
 
     def test_truly_different_cache_source_still_fails_without_installer_writes(self) -> None:
         source = self.cache / "source"
@@ -435,7 +574,7 @@ exit 0
         (legacy_source / ".git").mkdir(parents=True)
         sentinel = legacy_source / "legacy-cache.txt"
         sentinel.write_text("keep legacy cache\n", encoding="utf-8")
-        arguments = self._remote_arguments()
+        arguments = self._remote_arguments(ref=COMMIT)
         cache_index = arguments.index("--cache-root")
         del arguments[cache_index : cache_index + 2]
 
@@ -454,7 +593,7 @@ exit 0
             / ".cache"
             / "actanara"
             / "installer"
-            / "official-main"
+            / "official-release"
             / "source"
         )
         self.assertIn(str(isolated_source), git_log)
@@ -638,7 +777,7 @@ exit 0
         runtime = self.root / "runtime"
         self._write_marker(runtime)
         settings_before = (runtime / "config" / "settings.json").read_bytes()
-        arguments = self._remote_arguments()
+        arguments = self._remote_arguments(ref=COMMIT)
         arguments.extend(("--repair-existing", "--repair-existing", "--yes", "--yes"))
 
         result = self._run(*arguments)
@@ -653,8 +792,10 @@ exit 0
         self.assertEqual((runtime / "config" / "settings.json").read_bytes(), settings_before)
         self.assertTrue(self.cache.exists())
         git_log = self.git_log.read_text(encoding="utf-8")
-        self.assertIn("rev-parse --verify refs/remotes/origin/main^{commit}", git_log)
+        self.assertIn(f"rev-parse --verify {COMMIT}^{{commit}}", git_log)
         self.assertIn(f"checkout --detach {COMMIT}", git_log)
+        self.assertNotIn("refs/heads/main", git_log)
+        self.assertNotIn("refs/remotes/origin/main", git_log)
 
     def test_partial_runtime_tty_prompt_accepts_default_and_decline_is_noop(self) -> None:
         prompt = "当前 Actanara 不能直接升级，是否进行覆盖安装？现有数据与设置不会丢失，只会重建运行环境与依赖。 [Y/n]"

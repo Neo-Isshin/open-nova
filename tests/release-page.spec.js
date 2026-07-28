@@ -141,7 +141,7 @@ test("release page copy CTA writes the exact visible hosted install command", as
   await expect(page.getByRole("status")).toHaveText("安装命令已复制。");
   expect(await page.evaluate(() => window.__actanaraCopiedText)).toBe(command);
   expect(command).toBe(
-    "curl -fsSL https://raw.githubusercontent.com/Neo-Isshin/actanara/main/install/setup.sh | sh",
+    "curl -fsSL https://github.com/Neo-Isshin/actanara/releases/latest/download/install.sh | sh",
   );
 });
 

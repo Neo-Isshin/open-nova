@@ -460,6 +460,19 @@ exit 0
             f"""#!/usr/bin/env zsh
 set -eu
 print -r -- "$0 $*" >> "{log_path}"
+while [[ "$#" -gt 0 ]]; do
+  case "${{1:-}}" in
+    -c)
+      shift 2
+      ;;
+    --git-dir=*|--work-tree=*)
+      shift
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
 if [[ "${{1:-}}" == "clone" ]]; then
   target=""
   for arg in "$@"; do
@@ -477,7 +490,7 @@ if [[ "${{1:-}}" == "clone" ]]; then
   cp -R "{ROOT / 'src'}"/. "$target/src/"
   chmod +x "$target/install/install.sh"
 fi
-if [[ "${{1:-}}" == "-C" && "${{3:-}}" == "rev-parse" ]]; then
+if [[ "${{1:-}}" == "rev-parse" ]]; then
   print -r -- "{IMMUTABLE_TEST_COMMIT}"
 fi
 exit 0
@@ -788,7 +801,7 @@ exit 1
             "~/.actanara/bin/actanara",
             "--upgrade",
             "https://github.com/Neo-Isshin/actanara",
-            "https://raw.githubusercontent.com/Neo-Isshin/actanara/main/install/setup.sh",
+            "https://github.com/Neo-Isshin/actanara/releases/latest/download/install.sh",
         ):
             with self.subTest(token=token):
                 self.assertIn(token, runbook)
@@ -5153,7 +5166,8 @@ exit 1
         self.assertEqual(result.returncode, 0, output)
         self.assertIn("下载 Actanara", output)
         self.assertIn("准备安装文件", output)
-        self.assertIn("启动 Actanara 安装", output)
+        self.assertIn("已生成不可变源码计划", output)
+        self.assertNotIn("启动 Actanara 安装", output)
         self.assertNotIn("sparse-checkout", output)
         self.assertNotIn(f"checkout --detach {IMMUTABLE_TEST_COMMIT}", output)
         self.assertNotIn("install/install.sh --source-root", output)
@@ -5243,10 +5257,11 @@ exit 1
         output = result.stdout + result.stderr
 
         self.assertEqual(result.returncode, 0, output)
-        self.assertIn("git clone --filter=blob:none --sparse --no-checkout https://example.invalid/actanara.git", log)
+        self.assertIn("clone --filter=blob:none --sparse --no-checkout https://example.invalid/actanara.git", log)
         self.assertIn("sparse-checkout init --no-cone", log)
         self.assertIn("sparse-checkout set /pyproject.toml /MANIFEST.in /LICENSE /config.py /install /advanced /src", log)
-        self.assertIn("git -C", log)
+        self.assertIn("--git-dir=", log)
+        self.assertIn("--work-tree=", log)
         self.assertIn(f"checkout --detach {IMMUTABLE_TEST_COMMIT}", log)
         self.assertIn(f"reset --hard {IMMUTABLE_TEST_COMMIT}", log)
         self.assertNotIn("dry-run only", output)
@@ -5296,7 +5311,7 @@ exit 1
         output = result.stdout + result.stderr
 
         self.assertEqual(result.returncode, 0, output)
-        self.assertIn("git clone --filter=blob:none --sparse --no-checkout https://example.invalid/actanara.git", log)
+        self.assertIn("clone --filter=blob:none --sparse --no-checkout https://example.invalid/actanara.git", log)
         self.assertIn("sparse-checkout init --no-cone", log)
         self.assertIn("sparse-checkout set /pyproject.toml /MANIFEST.in /LICENSE /config.py /install /advanced /src", log)
         self.assertIn(f"checkout --detach {IMMUTABLE_TEST_COMMIT}", log)
@@ -5345,7 +5360,7 @@ exit 1
         output = result.stdout + result.stderr
 
         self.assertEqual(result.returncode, 0, output)
-        self.assertIn("git clone --filter=blob:none --sparse --no-checkout https://github.com/Neo-Isshin/actanara.git", log)
+        self.assertIn("clone --filter=blob:none --sparse --no-checkout https://github.com/Neo-Isshin/actanara.git", log)
         self.assertIn("sparse-checkout init --no-cone", log)
         self.assertIn("sparse-checkout set /pyproject.toml /MANIFEST.in /LICENSE /config.py /install /advanced /src", log)
         self.assertIn(f"checkout --detach {IMMUTABLE_TEST_COMMIT}", log)
@@ -5400,7 +5415,7 @@ exit 1
 
         self.assertEqual(result.returncode, 0, output)
         self.assertTrue(runtime_exists)
-        self.assertIn("git clone --filter=blob:none --sparse --no-checkout https://example.invalid/actanara.git", log)
+        self.assertIn("clone --filter=blob:none --sparse --no-checkout https://example.invalid/actanara.git", log)
         self.assertIn("sparse-checkout init --no-cone", log)
         self.assertIn("sparse-checkout set /pyproject.toml /MANIFEST.in /LICENSE /config.py /install /advanced /src", log)
         self.assertIn(f"checkout --detach {IMMUTABLE_TEST_COMMIT}", log)
