@@ -313,6 +313,7 @@ class ActanaraCliTests(unittest.TestCase):
     def test_dashboard_restart_uses_launch_agent_boundary(self):
         cli = _load_cli_module()
         with (
+            patch.object(cli.platform, "system", return_value="Darwin"),
             patch.object(cli, "dashboard_launch_defaults", return_value={"label": "com.actanara.dashboard"}) as defaults,
             patch.object(cli, "restart_dashboard_service", return_value=0) as restart,
             redirect_stdout(io.StringIO()) as output,
@@ -324,6 +325,39 @@ class ActanaraCliTests(unittest.TestCase):
         restart.assert_called_once_with("com.actanara.dashboard")
         self.assertIn("Actanara · Dashboard", output.getvalue())
         self.assertIn("Restarted", output.getvalue())
+
+    def test_dashboard_restart_uses_systemd_user_boundary_on_linux(self):
+        cli = _load_cli_module()
+        with (
+            patch.object(cli.platform, "system", return_value="Linux"),
+            patch.object(cli, "restart_dashboard_systemd_service", return_value={"status": "running"}) as restart,
+            patch.object(cli, "dashboard_launch_defaults") as defaults,
+            patch.object(cli, "restart_dashboard_service") as launchctl_restart,
+            redirect_stdout(io.StringIO()) as output,
+        ):
+            code = cli.main(["dashboard", "restart", "--runtime", "/tmp/Actanara"])
+
+        self.assertEqual(code, 0)
+        restart.assert_called_once()
+        self.assertEqual(restart.call_args.args[0].home, Path("/tmp/Actanara"))
+        defaults.assert_not_called()
+        launchctl_restart.assert_not_called()
+        self.assertIn("Restarted", output.getvalue())
+
+    def test_dashboard_restart_reports_linux_systemd_failure_without_traceback_or_launchctl(self):
+        cli = _load_cli_module()
+        with (
+            patch.object(cli.platform, "system", return_value="Linux"),
+            patch.object(cli, "restart_dashboard_systemd_service", side_effect=OSError("system bus unavailable")),
+            patch.object(cli, "restart_dashboard_service") as launchctl_restart,
+            redirect_stderr(io.StringIO()) as error,
+        ):
+            code = cli.main(["dashboard", "restart"])
+
+        self.assertEqual(code, 1)
+        launchctl_restart.assert_not_called()
+        self.assertIn("system bus unavailable", error.getvalue())
+        self.assertNotIn("Traceback", error.getvalue())
 
     def test_pipeline_rejects_positional_run_with_date_flag(self):
         cli = _load_cli_module()
@@ -596,7 +630,7 @@ class ActanaraCliTests(unittest.TestCase):
                 patch.object(cli, "_paths_from_args", return_value=candidate_paths),
                 patch.object(cli, "read_settings", return_value={}),
                 patch.object(cli.shutil, "which", return_value="/bin/zsh"),
-                patch.object(cli.subprocess, "run", return_value=completed),
+                patch.object(cli.subprocess, "run", return_value=completed) as run,
                 redirect_stdout(io.StringIO()) as output,
             ):
                 code = cli.main(
@@ -614,6 +648,7 @@ class ActanaraCliTests(unittest.TestCase):
         payload = json.loads(output.getvalue())
         policy = payload["mutationPolicy"]
         self.assertEqual(code, 0)
+        self.assertNotIn("env", run.call_args.kwargs)
         self.assertFalse(policy["dependenciesInstalled"])
         self.assertTrue(policy["sourceUpdated"])
         self.assertTrue(policy["managedServicesStoppedAfterPreflight"])
@@ -686,6 +721,42 @@ class ActanaraCliTests(unittest.TestCase):
         self.assertIn("--source-only", command[separator + 1 :])
         self.assertIn("--result-json", command[separator + 1 :])
 
+    def test_linux_remote_update_clears_ambient_bootstrap_source_selection(self):
+        cli = _load_cli_module()
+        completed = type(
+            "Completed",
+            (),
+            {
+                "returncode": 0,
+                "stdout": _update_result_line(sourceUpdated=False, stage="preflight"),
+                "stderr": "",
+            },
+        )()
+        ambient = {
+            "ACTANARA_INSTALL_SOURCE_ROOT": "/tmp/adjacent-checkout",
+            "ACTANARA_INSTALL_SOURCE_URL": "https://example.invalid/ambient.git",
+            "ACTANARA_INSTALL_REF": "b" * 40,
+        }
+        with (
+            patch.dict(os.environ, ambient, clear=False),
+            patch.object(cli.platform, "system", return_value="Linux"),
+            patch.object(cli, "load_paths", return_value=type("Paths", (), {"home": Path("/tmp/actanara")})()),
+            patch.object(cli, "read_settings", return_value={}),
+            patch.object(cli.shutil, "which", return_value="/bin/sh"),
+            patch.object(cli.subprocess, "run", return_value=completed) as run,
+            redirect_stdout(io.StringIO()),
+        ):
+            code = cli.main(["update", "--dry-run", "--ref", "a" * 40, "--json"])
+
+        self.assertEqual(code, 0)
+        environment = run.call_args.kwargs["env"]
+        self.assertNotIn("ACTANARA_INSTALL_SOURCE_ROOT", environment)
+        self.assertNotIn("ACTANARA_INSTALL_SOURCE_URL", environment)
+        self.assertNotIn("ACTANARA_INSTALL_REF", environment)
+        command = run.call_args.args[0]
+        self.assertIn("--source-url", command)
+        self.assertEqual(command[command.index("--ref") + 1], "a" * 40)
+
     def test_update_source_only_and_force_rebuild_are_mutually_exclusive(self):
         cli = _load_cli_module()
         with redirect_stderr(io.StringIO()) as error, self.assertRaises(SystemExit) as raised:
@@ -752,6 +823,53 @@ class ActanaraCliTests(unittest.TestCase):
         self.assertIsNone(payload["servicesStopped"])
         self.assertFalse(payload["resultAvailable"])
         self.assertIn("exit status 19", payload["reason"])
+
+    def test_completed_rollback_envelope_restores_certain_state_and_avoids_uncertain_warning(self):
+        cli = _load_cli_module()
+        completed = type(
+            "Completed",
+            (),
+            {
+                "returncode": 19,
+                "stdout": "rollback restored prior state\n"
+                + _update_result_line(
+                    status="failed",
+                    sourceUpdated=False,
+                    reason="update-failed-rolled-back",
+                    managedServiceDefinitionsNormalized=False,
+                    rollbackComplete=True,
+                    stateCertain=False,
+                    stage="rollback-complete",
+                ),
+                "stderr": "update failed after transaction start\n",
+            },
+        )()
+        with (
+            patch.object(cli, "load_paths", return_value=type("Paths", (), {"home": Path("/tmp/actanara")})()),
+            patch.object(cli, "read_settings", return_value={}),
+            patch.object(cli.subprocess, "run", return_value=completed),
+            redirect_stdout(io.StringIO()) as output,
+            redirect_stderr(io.StringIO()) as error,
+        ):
+            code = cli.main(["update", "--apply"])
+
+        self.assertEqual(code, 19)
+        self.assertIn("rollback restored prior state", output.getvalue())
+        self.assertNotIn("could not confirm that recovery finished", error.getvalue())
+
+        with (
+            patch.object(cli, "load_paths", return_value=type("Paths", (), {"home": Path("/tmp/actanara")})()),
+            patch.object(cli, "read_settings", return_value={}),
+            patch.object(cli.subprocess, "run", return_value=completed),
+            redirect_stdout(io.StringIO()) as json_output,
+        ):
+            json_code = cli.main(["update", "--apply", "--json"])
+
+        payload = json.loads(json_output.getvalue())
+        self.assertEqual(json_code, 19)
+        self.assertTrue(payload["rollbackComplete"])
+        self.assertTrue(payload["stateCertain"])
+        self.assertEqual(payload["stage"], "rollback-complete")
 
     def test_update_json_preserves_uncertain_state_from_incomplete_rollback(self):
         cli = _load_cli_module()

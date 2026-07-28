@@ -15,7 +15,7 @@ from urllib.parse import urlparse
 
 
 SCHEMA_VERSION = 1
-DASHBOARD_TARGET = "http://127.0.0.1:3036"
+DEFAULT_DASHBOARD_PORT = 3036
 SERVE_HTTPS_PORT = 443
 ENABLE_CONFIRMATION = "ENABLE ACTANARA TAILNET SERVE"
 DISABLE_CONFIRMATION = "DISABLE ACTANARA TAILNET SERVE"
@@ -49,7 +49,8 @@ def tailscale_status(
 
     command_runner = runner or subprocess.run
     binary = (which or shutil.which)("tailscale")
-    result = _empty_status(installed=bool(binary), binary=binary)
+    dashboard_target = _dashboard_target()
+    result = _empty_status(installed=bool(binary), binary=binary, dashboard_target=dashboard_target)
     if not binary:
         result["errors"].append(_error("tailscale-not-installed", "Tailscale CLI is not installed."))
         return result
@@ -99,7 +100,7 @@ def tailscale_status(
     if result["connected"]:
         try:
             raw_serve = _run_json(command_runner, [binary, "serve", "status", "--json"])
-            result["serve"] = _serve_status(raw_serve)
+            result["serve"] = _serve_status(raw_serve, dashboard_target=dashboard_target)
         except TailscaleCommandError as exc:
             result["serve"]["supported"] = False
             result["serve"]["statusError"] = exc.code
@@ -131,6 +132,7 @@ def set_dashboard_serve(
 
     command_runner = runner or subprocess.run
     binary = (which or shutil.which)("tailscale")
+    dashboard_target = _dashboard_target()
     if not binary:
         raise TailscalePolicyError("tailscale-not-installed", "Tailscale CLI is not installed; install it manually first.")
     current = observed_status or tailscale_status(runner=command_runner, which=lambda _name: binary)
@@ -143,16 +145,26 @@ def set_dashboard_serve(
 
     if enabled:
         if serve.get("exclusiveManaged"):
-            return _action_result(enabled=True, changed=False, command=None)
+            return _action_result(
+                enabled=True,
+                changed=False,
+                command=None,
+                dashboard_target=dashboard_target,
+            )
         if serve.get("enabled"):
             raise TailscalePolicyError(
                 "tailscale-serve-conflict",
                 "Existing Tailscale Serve configuration is not owned exclusively by Actanara; it was preserved.",
             )
-        argv = [binary, "serve", "--yes", "--bg", f"--https={SERVE_HTTPS_PORT}", DASHBOARD_TARGET]
+        argv = [binary, "serve", "--yes", "--bg", f"--https={SERVE_HTTPS_PORT}", dashboard_target]
     else:
         if not serve.get("enabled"):
-            return _action_result(enabled=False, changed=False, command=None)
+            return _action_result(
+                enabled=False,
+                changed=False,
+                command=None,
+                dashboard_target=dashboard_target,
+            )
         if not serve.get("exclusiveManaged"):
             raise TailscalePolicyError(
                 "tailscale-serve-not-owned",
@@ -161,7 +173,12 @@ def set_dashboard_serve(
         argv = [binary, "serve", f"--https={SERVE_HTTPS_PORT}", "off"]
 
     _run(command_runner, argv)
-    return _action_result(enabled=enabled, changed=True, command=argv[1:])
+    return _action_result(
+        enabled=enabled,
+        changed=True,
+        command=argv[1:],
+        dashboard_target=dashboard_target,
+    )
 
 
 def dashboard_access_status(status: dict[str, Any], allowed_origins: Iterable[str]) -> dict[str, Any]:
@@ -178,12 +195,18 @@ def dashboard_access_status(status: dict[str, Any], allowed_origins: Iterable[st
     }
 
 
-def _empty_status(*, installed: bool, binary: str | None) -> dict[str, Any]:
+def _empty_status(
+    *,
+    installed: bool,
+    binary: str | None,
+    dashboard_target: str,
+) -> dict[str, Any]:
     return {
         "schemaVersion": SCHEMA_VERSION,
         "mode": "tailnet-only",
         "installed": installed,
         "binaryPath": binary,
+        "dashboardTarget": dashboard_target,
         "loginState": "not-installed" if not installed else "unknown",
         "loggedIn": False,
         "connected": False,
@@ -294,7 +317,7 @@ def _magic_dns(status: dict[str, Any]) -> tuple[str | None, str | None]:
     return dns_name, suffix
 
 
-def _serve_status(raw: dict[str, Any]) -> dict[str, Any]:
+def _serve_status(raw: dict[str, Any], *, dashboard_target: str) -> dict[str, Any]:
     endpoints: list[dict[str, str]] = []
     web = raw.get("Web") if isinstance(raw.get("Web"), dict) else {}
     for listener, config in web.items():
@@ -308,7 +331,7 @@ def _serve_status(raw: dict[str, Any]) -> dict[str, Any]:
 
     if not endpoints:
         endpoints.extend(_generic_proxy_endpoints(raw))
-    managed = [item for item in endpoints if _same_target(item.get("target"), DASHBOARD_TARGET)]
+    managed = [item for item in endpoints if _same_target(item.get("target"), dashboard_target)]
     exclusive = len(endpoints) == 1 and len(managed) == 1 and _is_https_443_listener(managed[0].get("listener"))
     exposes_rag = any(_target_port(item.get("target")) == 3037 for item in endpoints)
     enabled = bool(endpoints or _has_unparsed_serve_configuration(raw))
@@ -376,17 +399,39 @@ def _target_port(value: str | None) -> int | None:
         return None
 
 
-def _action_result(*, enabled: bool, changed: bool, command: list[str] | None) -> dict[str, Any]:
+def _action_result(
+    *,
+    enabled: bool,
+    changed: bool,
+    command: list[str] | None,
+    dashboard_target: str | None = None,
+) -> dict[str, Any]:
     return {
         "schemaVersion": SCHEMA_VERSION,
         "mode": "tailnet-only",
         "ok": True,
         "changed": changed,
         "serveEnabled": enabled,
-        "target": DASHBOARD_TARGET,
+        "target": dashboard_target or _dashboard_target(),
         "command": command,
         "funnel": {"available": False, "enabled": False, "reason": "disabled-by-policy"},
     }
+
+
+def _configured_dashboard_port() -> int:
+    from data_foundation.settings import resolve_dashboard_settings
+
+    try:
+        value = resolve_dashboard_settings().get("port")
+    except Exception:
+        return DEFAULT_DASHBOARD_PORT
+    if type(value) is not int or not 1 <= value <= 65535:
+        return DEFAULT_DASHBOARD_PORT
+    return value
+
+
+def _dashboard_target() -> str:
+    return f"http://127.0.0.1:{_configured_dashboard_port()}"
 
 
 def _error(code: str, message: str) -> dict[str, str]:

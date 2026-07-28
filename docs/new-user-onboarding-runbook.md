@@ -46,6 +46,13 @@ source-only refresh, automatic or forced locked-venv upgrade, and explicitly
 confirmed repair. Both platforms preserve user Settings and data; Linux also
 preserves each managed systemd unit's prior enabled/active state.
 
+For an existing managed Linux Runtime, an interactive run previews the pinned
+upgrade and asks before applying it. A non-interactive run exits with status 2,
+makes no Runtime changes, and prints exact pinned `actanara update --dry-run` and
+`actanara update --apply` commands. Explicit remote source selection uses a
+matching installer-cache `origin` and the exact requested commit; the
+bootstrap's adjacent checkout is never substituted for it.
+
 ## Install from a checkout
 
 To inspect the plan without writes:

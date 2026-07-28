@@ -608,7 +608,10 @@ with patch.object(settings_transaction, "settings_transaction_checkpoint", side_
         self.assertEqual(journal["status"], "compensated")
 
     def test_two_operator_transactions_serialize_without_lost_updates(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "data_foundation.settings.platform.system",
+            return_value="Linux",
+        ):
             paths = self._runtime(Path(tmp))
             barrier = threading.Barrier(3)
             errors = []
@@ -640,6 +643,29 @@ with patch.object(settings_transaction, "settings_transaction_checkpoint", side_
         self.assertEqual(errors, [])
         self.assertEqual(saved["schedule"]["dailyPipelineTime"], "07:10")
         self.assertEqual(saved["dashboard"]["port"], 18765)
+
+    def test_linux_operator_transaction_rejects_a_durable_update_owner(self):
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "data_foundation.settings.platform.system",
+            return_value="Linux",
+        ):
+            paths = self._runtime(Path(tmp))
+            owner_path = paths.home / "app" / "owner.json"
+            owner_path.write_text(
+                json.dumps({"txId": "active-update-owner"}) + "\n",
+                encoding="utf-8",
+            )
+            owner_path.chmod(0o600)
+            os.link(owner_path, paths.home / "app" / ".update-transaction.lock")
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "install, update, or repair transaction is active",
+            ):
+                write_operator_settings_bundle(
+                    {"settings": {"dashboard": {"port": 18766}}},
+                    paths,
+                )
 
     def test_secret_store_failures_leave_files_unchanged(self):
         for failure in (TimeoutError("timeout"), RuntimeError("locked"), OSError("unavailable")):

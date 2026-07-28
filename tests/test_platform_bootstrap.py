@@ -20,25 +20,33 @@ class PlatformBootstrapTests(unittest.TestCase):
             adapter = install / name
             adapter.write_text(
                 "#!/bin/sh\n"
-                "printf '%s\\n' \"$0\" \"$@\" > \"$ACTANARA_TEST_ADAPTER_LOG\"\n",
+                "printf '%s\\n' \"$0\" \"$@\" > \"$ACTANARA_TEST_ADAPTER_LOG\"\n"
+                "if [ -n \"${ACTANARA_TEST_PUBLIC_ENTRY_LOG:-}\" ]; then\n"
+                "  printf '%s\\n' \"${ACTANARA_INSTALL_PUBLIC_ENTRY:-}\" > \"$ACTANARA_TEST_PUBLIC_ENTRY_LOG\"\n"
+                "fi\n",
                 encoding="utf-8",
             )
             adapter.chmod(0o755)
         return source
 
-    def _run(self, platform: str, *arguments: str) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+    def _run(
+        self, platform: str, *arguments: str
+    ) -> tuple[subprocess.CompletedProcess[str], list[str], str]:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         root = Path(temporary.name)
         source = self._adapter_fixture(root)
         log = root / "adapter.log"
+        public_entry_log = root / "public-entry.log"
         env = {
             **os.environ,
             "ACTANARA_INSTALL_TEST_MODE": "1",
             "ACTANARA_SETUP_PLATFORM": platform,
             "ACTANARA_INSTALL_SOURCE_ROOT": str(source),
             "ACTANARA_TEST_ADAPTER_LOG": str(log),
+            "ACTANARA_TEST_PUBLIC_ENTRY_LOG": str(public_entry_log),
         }
+        env.pop("ACTANARA_INSTALL_PUBLIC_ENTRY", None)
         if platform == "Darwin":
             # The fixture adapter is POSIX shell, so exercising Darwin
             # dispatch must not require zsh to be installed on a Linux host.
@@ -52,7 +60,8 @@ class PlatformBootstrapTests(unittest.TestCase):
             check=False,
         )
         lines = log.read_text(encoding="utf-8").splitlines() if log.exists() else []
-        return result, lines
+        public_entry = public_entry_log.read_text(encoding="utf-8").strip() if public_entry_log.exists() else ""
+        return result, lines, public_entry
 
     def test_hosted_entrypoint_is_posix_and_truncation_safe(self):
         script = SETUP.read_text(encoding="utf-8")
@@ -73,25 +82,28 @@ class PlatformBootstrapTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
 
     def test_macos_dispatches_to_existing_zsh_adapter(self):
-        result, arguments = self._run("Darwin", "--dry-run", "--", "--no-scheduler")
+        result, arguments, public_entry = self._run("Darwin", "--dry-run", "--", "--no-scheduler")
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertTrue(arguments[0].endswith("install/bootstrap.sh"))
         self.assertEqual(arguments[1:], ["--dry-run", "--", "--no-scheduler"])
+        self.assertEqual(public_entry, "")
 
     def test_linux_dispatches_to_posix_linux_adapter(self):
-        result, arguments = self._run("Linux", "--dry-run", "--", "--no-scheduler")
+        result, arguments, public_entry = self._run("Linux", "--dry-run", "--", "--no-scheduler")
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertTrue(arguments[0].endswith("install/bootstrap-linux.sh"))
         self.assertEqual(arguments[1:], ["--dry-run", "--", "--no-scheduler"])
+        self.assertEqual(public_entry, "1")
 
     def test_unknown_platform_fails_without_running_an_adapter(self):
-        result, arguments = self._run("FreeBSD")
+        result, arguments, public_entry = self._run("FreeBSD")
 
         self.assertEqual(result.returncode, 2)
         self.assertIn("unsupported platform: FreeBSD", result.stderr)
         self.assertEqual(arguments, [])
+        self.assertEqual(public_entry, "")
 
     def test_remote_entrypoint_binds_downloaded_adapter_to_exact_main_commit(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -210,6 +210,31 @@ def _v2_runtime_source_manifest(source_locator: dict[str, object]) -> dict[str, 
 
 
 class RuntimeSettingsTests(unittest.TestCase):
+    def test_settings_transaction_lock_is_reentrant_in_one_thread(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = initialize_home(
+                Path(tmp) / "Actanara",
+                legacy_diary_root=Path(tmp) / "Diary",
+            )
+            with foundation_settings_transaction._transaction_lock(paths):
+                with foundation_settings_transaction._transaction_lock(paths):
+                    pass
+
+    def test_linux_initialized_runtime_read_persists_defaults_safely(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = initialize_home(
+                Path(tmp) / "Actanara",
+                legacy_diary_root=Path(tmp) / "Diary",
+            )
+            with patch(
+                "data_foundation.settings.platform.system",
+                return_value="Linux",
+            ):
+                payload = read_settings(paths)
+
+            self.assertEqual(payload["schemaVersion"], 1)
+            self.assertTrue((paths.config_dir / "settings.json").is_file())
+
     def setUp(self):
         # This legacy integration module defines the macOS/launchd contract.
         # Linux-specific behavior is covered by test_systemd_user and explicit
@@ -221,6 +246,14 @@ class RuntimeSettingsTests(unittest.TestCase):
             patch("data_foundation.scheduler_preview.platform.system", return_value="Darwin"),
             patch("data_foundation.settings_status.platform.system", return_value="Darwin"),
             patch("data_foundation.onboarding_plan.platform.system", return_value="Darwin"),
+            patch(
+                "data_foundation.settings.detect_system_timezone_authority",
+                return_value="UTC",
+            ),
+            patch(
+                "data_foundation.scheduler_preview.detect_system_timezone_authority",
+                return_value="UTC",
+            ),
         )
         for patcher in patchers:
             patcher.start()
@@ -560,6 +593,23 @@ class RuntimeSettingsTests(unittest.TestCase):
         self.assertIn("missing apiKey", message)
         self.assertIn("configured apiKeyEnv", message)
         self.assertNotIn(secret_like_env, message)
+
+    def test_llm_provider_readiness_is_a_read_only_boundary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = initialize_home(
+                Path(tmp) / "Actanara",
+                legacy_diary_root=Path(tmp) / "Diary",
+            )
+            read_settings(paths, redact_secrets=False)
+
+            with patch.object(
+                foundation_settings,
+                "migrate_persisted_secret_refs",
+                side_effect=AssertionError("readiness must not migrate Settings"),
+            ):
+                message = llm_provider_readiness_error(paths)
+
+        self.assertIn("missing apiKey", message)
 
     def test_nova_task_feature_flag_defaults_on_and_can_be_disabled(self):
         with tempfile.TemporaryDirectory() as tmp:

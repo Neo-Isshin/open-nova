@@ -3,6 +3,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import signal
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -362,6 +363,35 @@ class DashboardLaunchAgentTests(unittest.TestCase):
         self.assertEqual(env["PYTHONDONTWRITEBYTECODE"], "1")
         self.assertIn("/repo/src", env["PYTHONPATH"])
         self.assertEqual(plist["StandardOutPath"], "/tmp/logs/rag-server-launchagent.out.log")
+
+    def test_linux_rag_wrapper_turns_sigterm_into_cancelable_child_shutdown(self):
+        args = SimpleNamespace(
+            actanara_home=Path("/nova"),
+            project_root=ROOT,
+        )
+        registered = {}
+        settings = object()
+
+        def register(signum, handler):
+            registered[signum] = handler
+
+        def start(_settings, **kwargs):
+            registered[signal.SIGTERM](signal.SIGTERM, None)
+            self.assertTrue(kwargs["cancel_event"].is_set())
+            return {"accepted": False, "status": "canceled", "reason": "canceled"}
+
+        with (
+            patch.dict(os.environ, {}, clear=False),
+            patch.object(rag_agent.sys, "platform", "linux"),
+            patch.object(rag_agent.signal, "signal", side_effect=register),
+            patch("agentic_rag.rag_settings.resolve_rag_settings", return_value=settings),
+            patch("agentic_rag.rag_server_lifecycle.start_rag_server", side_effect=start),
+            patch("agentic_rag.rag_server_lifecycle.stop_rag_server") as stop,
+        ):
+            result = rag_agent.run_server(args)
+
+        self.assertEqual(result, 0)
+        stop.assert_called_once()
 
     def test_rag_launcher_does_not_restart_a_run_at_load_manager_after_bootstrap(self):
         with patch.object(rag_agent, "rag_launch_defaults") as defaults:

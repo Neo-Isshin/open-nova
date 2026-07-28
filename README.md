@@ -17,6 +17,7 @@
   <a href="https://neo-isshin.github.io/actanara/"><img src="https://img.shields.io/badge/Website-GitHub%20Pages-2563EB" alt="Website"></a>
   <a href="https://github.com/Neo-Isshin/actanara/releases/latest"><img src="https://img.shields.io/github/v/release/Neo-Isshin/actanara?display_name=tag&amp;sort=semver" alt="Latest stable Release"></a>
   <a href="https://neo-isshin.github.io/actanara/dashboard-demo/"><img src="https://img.shields.io/badge/Demo-interactive-7C3AED" alt="Interactive Dashboard Demo"></a>
+  <a href="#linux-support"><img src="https://img.shields.io/badge/Linux-Debian%20x64%20verified-FCC624?logo=linux&amp;logoColor=111827" alt="Linux support: verified on Debian x86_64"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-16A34A" alt="License"></a>
   <a href="https://discord.gg/JvJHngZWz"><img src="https://img.shields.io/badge/Discord-Join-5865F2" alt="Discord"></a>
 </p>
@@ -24,6 +25,7 @@
 <p align="center">
   <a href="https://neo-isshin.github.io/actanara/dashboard-demo/"><strong>Try the Interactive Dashboard</strong></a> ·
   <a href="#install-actanara"><strong>Install Actanara</strong></a> ·
+  <a href="#linux-support"><strong>Linux Support</strong></a> ·
   <a href="docs/local-operations-runbook.md">Operations Runbook</a>
 </p>
 
@@ -75,6 +77,13 @@ definition drift or non-Actanara units. New here? You can explore the
 [interactive Dashboard demo](https://neo-isshin.github.io/actanara/dashboard-demo/)
 before installing.
 
+When the Linux public entrypoint finds an existing managed Runtime, a run with
+a controlling terminal prints the pinned upgrade plan and asks before applying
+it. Without a controlling terminal it exits with status 2, makes no Runtime
+changes, and prints exact copy-paste `actanara update --dry-run` and
+`actanara update --apply` commands that include the resolved source URL,
+commit, Runtime, and installer cache.
+
 The stable Runtime shim is `~/.actanara/bin/actanara`; installation also links
 `~/.local/bin/actanara` by default. On macOS, `--no-shell-path` and
 `--shell-path-file /path/to/profile` control the managed profile block. On
@@ -85,6 +94,44 @@ sources.
 
 For the exact write locations and launchd/systemd registration boundaries, see
 the [Local Operations Runbook](docs/local-operations-runbook.md).
+
+<a id="linux-support"></a>
+## 🐧 Linux Support
+
+Actanara has a native, non-root Linux path for Debian-class hosts using
+`systemd --user`; it is not a macOS compatibility shim. The current release
+gate is exercised on Debian 13 x86_64 with CPython 3.13 and systemd 257. The
+dependency lock also has an arm64 target, while x86_64 is the architecture
+covered by the real-host functional gate.
+
+| Capability | Linux behavior |
+| :--- | :--- |
+| **Install and update** | The public `setup.sh` entrypoint supports guarded fresh install, exact-ref/source-only update, locked dependency upgrade, and explicit repair. Fresh generations are staged and promoted atomically; failures leave the previous Runtime recoverable. |
+| **User boundary and services** | Run `setup.sh` as a regular login user, not through `sudo`. Actanara does not invoke `sudo`; Dashboard, optional `nova-RAG`, and scheduled jobs run as user-level systemd units controlled through `systemctl --user`. |
+| **RAG readiness** | Fresh install can enable the audited CPU-only local profile using `intfloat/multilingual-e5-small` at 384 dimensions. Fresh managed cloud RAG fails closed until a credential-backed provider profile exists. Installation reports success only after the managed listener, source commit, provider profile, model, and health response agree. |
+| **Ports and headless hosts** | Dashboard and RAG bind loopback by default on ports 3036 and 3037. On a headless host, forward the configured Dashboard port over SSH and use the same local port so browser Origin checks remain valid. |
+| **Session lifetime** | Non-interactive installation does not change systemd linger. Linger is requested only through an explicit option or an interactive confirmation. |
+
+For a headless host using the default Dashboard port:
+
+```bash
+ssh -N -L 3036:127.0.0.1:3036 user@linux-host
+# Then open http://127.0.0.1:3036/dashboard locally.
+```
+
+Use the actual configured Dashboard port on both sides of the tunnel. For a
+quick Linux health check:
+
+```bash
+actanara doctor --installer
+actanara doctor --scheduler
+actanara doctor --rag  # When nova-RAG is enabled.
+```
+
+An offline fresh install preflights Python/pip bootstrap and the trusted
+dependency cache; if the required bootstrap material is unavailable, it stops
+before creating a release generation. Linux uses the selected system Python
+and does not install a managed Python runtime.
 
 ## 🎥 Quick Start
 
@@ -153,7 +200,7 @@ nova-RAG (optional) → Read-only Retrieval for External Runtimes
 ## 💻 Support and Prerequisites
 
 - 🍎 **macOS remains first-class:** Guided installation, updates, local nova-RAG, Dashboard services, and managed scheduling retain their existing user-level `LaunchAgent` behavior.
-- 🐧 **Linux has an explicit Core boundary:** Fresh installs are available for Debian-class `systemd --user` hosts on x86_64 and arm64 lock targets, including cloud or CPU-only local-embedding RAG. Guarded upgrade/repair is release-gated on Debian x86_64 with CPython 3.13; the guided wizard and managed-Python bootstrap remain macOS-only.
+- 🐧 **Linux has an explicit Core boundary:** Fresh installs are available for Debian-class `systemd --user` hosts with x86_64 and arm64 lock targets, including the audited CPU-only local-embedding RAG profile. Fresh managed cloud RAG fails closed until a credential-backed provider profile exists. Guarded upgrade/repair is release-gated on Debian x86_64 with CPython 3.13; the guided wizard and managed-Python bootstrap remain macOS-only.
 - 🛠️ **Base tools:** Requires `git` and `curl`, plus `zsh` on macOS or POSIX `sh` on Linux; no `sudo`.
 - 🐍 **Python:** macOS supports Python ≥ 3.11 and can install a verified managed Python; the audited Linux lock currently targets CPython 3.13.
 - 🌐 **Network and storage:** Installation needs access to GitHub, the Python package index, and your model services; the first local `nova-RAG` run may download model weights.
@@ -250,6 +297,11 @@ actanara update --apply
 ```
 
 When dependencies are unchanged the updater reuses the venv; otherwise it rebuilds from the hashed lock. Details on venv reuse, `--source-only/--force-rebuild/--offline`, source acquisition, and commit pinning are in the Runbook's *Update* section. Actanara does not yet ship a one-command uninstaller—do not remove only `~/.actanara`; see the Runbook's *Uninstall boundary* section.
+
+On Linux, an explicit `--source-url` or `--ref` makes the nearby bootstrap file
+an execution entry only. The selected source is prepared in the installer
+cache; its normalized Git `origin` and exact fetched/cached commit are verified
+online and offline before the installer runs.
 
 On Linux, ordinary updates require aligned Actanara-managed systemd definitions
 and preserve each unit's prior enabled/active state. If trusted Runtime

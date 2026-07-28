@@ -15,6 +15,7 @@ from data_foundation.scheduler_preview import preview_system_timer
 from data_foundation.settings import write_settings
 from data_foundation.settings_status import actanara_settings_status
 from data_foundation.systemd_user import (
+    SystemdUserCompensationError,
     SystemdUserError,
     dashboard_unit,
     enable_linger,
@@ -73,6 +74,48 @@ class SystemdUserTests(unittest.TestCase):
         self.assertNotIn("/bin/zsh", dashboard.content)
         self.assertEqual(rag.name, "actanara-rag-server.service")
         self.assertIn("rag_server_launch_agent.py", rag.content)
+        self.assertIn("KillMode=control-group", rag.content)
+        self.assertIn("TimeoutStopSec=10s", rag.content)
+        self.assertIn("SendSIGKILL=yes", rag.content)
+
+    def test_install_readiness_failure_compensates_systemd_transaction(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self._runtime(root)
+            unit_dir = root / "units"
+            unit_dir.mkdir()
+            unit = rag_unit(paths)
+            enabled = False
+
+            def runner(command, **_kwargs):
+                nonlocal enabled
+                verb = command[2]
+                if verb == "is-enabled":
+                    return subprocess.CompletedProcess(command, 0 if enabled else 4, "", "")
+                if verb == "is-active":
+                    return subprocess.CompletedProcess(command, 0 if enabled else 4, "", "")
+                if verb == "enable":
+                    enabled = True
+                elif verb == "disable":
+                    enabled = False
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            with (
+                patch("data_foundation.systemd_user.platform.system", return_value="Linux"),
+                patch("data_foundation.systemd_user._systemctl_binary", return_value="/usr/bin/systemctl"),
+                patch("data_foundation.systemd_user.time.sleep"),
+                self.assertRaisesRegex(SystemdUserError, "readiness verification failed"),
+            ):
+                install_user_units(
+                    paths,
+                    [unit],
+                    unit_dir=unit_dir,
+                    runner=runner,
+                    readiness_verifier=lambda: (_ for _ in ()).throw(RuntimeError("model failed")),
+                )
+
+            self.assertFalse(enabled)
+            self.assertFalse((unit_dir / unit.name).exists())
 
     def test_dashboard_and_rag_units_honor_valid_persisted_unit_names(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -146,6 +189,8 @@ class SystemdUserTests(unittest.TestCase):
                 commands.append(command)
                 if "show-user" in command:
                     return subprocess.CompletedProcess(command, 0, "no\n", "")
+                if command[2] == "is-active":
+                    return subprocess.CompletedProcess(command, 0, "active\n", "")
                 return subprocess.CompletedProcess(command, 0, "enabled\n", "")
 
             with (
@@ -163,6 +208,70 @@ class SystemdUserTests(unittest.TestCase):
             self.assertEqual(unit_dir.stat().st_mode & 0o777, 0o700)
             for unit in units:
                 self.assertEqual((unit_dir / unit.name).stat().st_mode & 0o777, 0o600)
+
+    def test_transaction_rejects_nonrestorable_prior_systemd_state_before_writes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self._runtime(root)
+            unit_dir = root / "units"
+            unit_dir.mkdir()
+            unit = dashboard_unit(paths, {"host": "127.0.0.1", "port": 3036})
+
+            def runner(command, **_kwargs):
+                if command[2] == "is-enabled":
+                    return subprocess.CompletedProcess(command, 0, "enabled-runtime\n", "")
+                if command[2] == "is-active":
+                    return subprocess.CompletedProcess(command, 0, "active\n", "")
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            with (
+                patch("data_foundation.systemd_user.platform.system", return_value="Linux"),
+                patch("data_foundation.systemd_user._systemctl_binary", return_value="/usr/bin/systemctl"),
+                self.assertRaisesRegex(SystemdUserError, "non-restorable prior state"),
+            ):
+                install_user_units(paths, [unit], unit_dir=unit_dir, runner=runner)
+
+            self.assertFalse((unit_dir / unit.name).exists())
+
+    def test_definition_change_after_snapshot_is_not_overwritten(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self._runtime(root)
+            unit_dir = root / "units"
+            unit_dir.mkdir()
+            unit = dashboard_unit(paths, {"host": "127.0.0.1", "port": 3036})
+            target = unit_dir / unit.name
+            target.write_text(
+                "# Managed by Actanara. Do not edit by hand.\nprior\n",
+                encoding="utf-8",
+            )
+
+            def runner(command, **_kwargs):
+                token = "active" if command[2] == "is-active" else "enabled"
+                return subprocess.CompletedProcess(command, 0, token + "\n", "")
+
+            def checkpoint(phase, _transaction_id):
+                if phase == "after-prior-captured":
+                    target.write_text(
+                        "# Managed by Actanara. Do not edit by hand.\nconcurrent\n",
+                        encoding="utf-8",
+                    )
+
+            with (
+                patch("data_foundation.systemd_user.platform.system", return_value="Linux"),
+                patch("data_foundation.systemd_user._systemctl_binary", return_value="/usr/bin/systemctl"),
+                patch(
+                    "data_foundation.systemd_user.systemd_transaction_checkpoint",
+                    side_effect=checkpoint,
+                ),
+                self.assertRaisesRegex(
+                    SystemdUserCompensationError,
+                    "prior state restoration is incomplete",
+                ),
+            ):
+                install_user_units(paths, [unit], unit_dir=unit_dir, runner=runner)
+
+            self.assertIn("concurrent", target.read_text(encoding="utf-8"))
 
     def test_install_failure_restores_preexisting_unit(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -205,20 +314,50 @@ class SystemdUserTests(unittest.TestCase):
             )
             timer_names = [unit.name for unit in units if unit.enable_now]
             commands = []
-            status_calls = {name: 0 for name in timer_names}
+            states = {
+                unit.name: {
+                    "enabled": unit.name == timer_names[0],
+                    "active": unit.name == timer_names[0],
+                }
+                for unit in units
+            }
+            forward_enable_failed = False
 
             def runner(command, **kwargs):
+                nonlocal forward_enable_failed
                 commands.append(command)
                 verb = command[2]
-                if verb in {"is-enabled", "is-active"}:
+                if verb == "is-enabled":
                     name = command[3]
-                    status_calls.setdefault(name, 0)
-                    status_calls[name] += 1
-                    if status_calls[name] <= 2 and name == timer_names[0]:
-                        return subprocess.CompletedProcess(command, 0, "yes\n", "")
-                    return subprocess.CompletedProcess(command, 4, "no\n", "")
-                if verb == "enable" and len(command) > 4:
+                    enabled = states[name]["enabled"]
+                    return subprocess.CompletedProcess(
+                        command,
+                        0 if enabled else 4,
+                        "enabled\n" if enabled else "disabled\n",
+                        "",
+                    )
+                if verb == "is-active":
+                    name = command[3]
+                    active = states[name]["active"]
+                    return subprocess.CompletedProcess(
+                        command,
+                        0 if active else 4,
+                        "active\n" if active else "inactive\n",
+                        "",
+                    )
+                now = len(command) > 3 and command[3] == "--now"
+                names = command[4:] if now else command[3:]
+                if verb == "enable" and len(names) > 1 and not forward_enable_failed:
+                    forward_enable_failed = True
                     return subprocess.CompletedProcess(command, 9, "", "failed")
+                if verb in {"enable", "disable"}:
+                    for name in names:
+                        states[name]["enabled"] = verb == "enable"
+                        if now:
+                            states[name]["active"] = verb == "enable"
+                elif verb in {"start", "restart", "stop"}:
+                    for name in command[3:]:
+                        states[name]["active"] = verb != "stop"
                 return subprocess.CompletedProcess(command, 0, "", "")
 
             with (
@@ -236,6 +375,7 @@ class SystemdUserTests(unittest.TestCase):
             any(command[2:] == ["enable", "--now", timer_names[0]] for command in commands)
         )
         self.assertEqual(units_present_after_rollback, [])
+        self.assertEqual(states[timer_names[0]], {"enabled": True, "active": True})
 
     def test_install_compensates_when_service_exits_during_stability_window(self):
         with tempfile.TemporaryDirectory() as tmp:

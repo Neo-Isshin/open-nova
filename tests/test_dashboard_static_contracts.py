@@ -7,6 +7,12 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class DashboardStaticContractTests(unittest.TestCase):
+    def test_service_settings_use_active_provider_without_linux_facing_launchd_fallback(self):
+        script = (ROOT / "src" / "dashboard" / "app" / "static" / "js" / "app.js").read_text(encoding="utf-8")
+        self.assertIn("status, runtime state, and definition alignment come from the active service manager", script)
+        self.assertIn("if (provider) systemTimer.provider = provider", script)
+        self.assertNotIn("provider || 'launchd'", script)
+
     def test_dashboard_mobile_shell_prevents_sidebar_squeeze(self):
         html = (ROOT / "src" / "dashboard" / "app" / "static" / "index.html").read_text(encoding="utf-8")
         css = (ROOT / "src" / "dashboard" / "app" / "static" / "css" / "style.css").read_text(encoding="utf-8")

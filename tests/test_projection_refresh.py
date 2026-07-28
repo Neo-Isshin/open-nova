@@ -982,8 +982,8 @@ No activity today.
                     "ACTANARA_HOME": str(paths.home),
                     "ACTANARA_DASHBOARD_LLM_KEY": "secret",
                 },
-            ):
-                dashboard_settings.update_llm_provider(
+            ), patch("data_foundation.settings.platform.system", return_value="Linux"):
+                saved = dashboard_settings.update_llm_provider(
                     {
                         "provider": "openai-compatible",
                         "endpoint": "https://llm.local",
@@ -1000,6 +1000,7 @@ No activity today.
                     periods=periods,
                 )
 
+        self.assertEqual(saved["settingsTransaction"]["status"], "committed")
         self.assertIsInstance(run_id, int)
 
     def test_history_backfill_requires_overwrite_confirmation_for_existing_daily_diary(self):

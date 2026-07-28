@@ -176,10 +176,7 @@ def update_settings_bundle(payload: dict) -> dict:
         _validate_llm_provider_update_pipeline_secret(paths, update.get("llmProvider"))
     verifier = None
     if "llmProvider" in update:
-        verifier = lambda: _raise_if_llm_provider_not_pipeline_ready(
-            paths,
-            read_llm_provider(paths),
-        )
+        verifier = lambda: _raise_if_llm_provider_not_pipeline_ready(paths)
     settings = write_operator_settings_bundle(
         update,
         paths,
@@ -187,7 +184,7 @@ def update_settings_bundle(payload: dict) -> dict:
     )
     settings["llmProvider"] = read_llm_provider(paths)
     if "llmProvider" in update:
-        _raise_if_llm_provider_not_pipeline_ready(paths, settings["llmProvider"])
+        _raise_if_llm_provider_not_pipeline_ready(paths)
     settings["agentSchedulePrompt"] = build_agent_schedule_prompt(settings)
     settings["authority"] = runtime_authority_contract(paths)
     settings["runtimePath"] = current_runtime_path()
@@ -1081,14 +1078,11 @@ def update_llm_provider(payload: dict) -> dict:
     saved = write_operator_settings_bundle(
         {"llmProvider": payload if isinstance(payload, dict) else {}},
         paths,
-        readiness_verifier=lambda: _raise_if_llm_provider_not_pipeline_ready(
-            paths,
-            read_llm_provider(paths),
-        ),
+        readiness_verifier=lambda: _raise_if_llm_provider_not_pipeline_ready(paths),
     )
     provider = read_llm_provider(paths)
     provider["settingsTransaction"] = saved.get("settingsTransaction")
-    _raise_if_llm_provider_not_pipeline_ready(paths, provider)
+    _raise_if_llm_provider_not_pipeline_ready(paths)
     return provider
 
 
@@ -1141,7 +1135,7 @@ def _validate_llm_provider_update_pipeline_secret(paths: RuntimePaths, payload: 
         )
 
 
-def _raise_if_llm_provider_not_pipeline_ready(paths: RuntimePaths, provider: dict) -> None:
+def _raise_if_llm_provider_not_pipeline_ready(paths: RuntimePaths) -> None:
     readiness_error = llm_provider_readiness_error(paths, require_cross_process_secret=True)
     if readiness_error:
         raise ValueError(readiness_error)

@@ -278,10 +278,23 @@ async def api_dashboard_launch_agent_preview():
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
+def _service_manager_mutation(kind: str, action: str, payload: dict | None):
+    if service_manager.service_action_requires_async(kind, action, payload):
+        queued = service_manager.enqueue_service_action(kind, action, payload)
+        return JSONResponse(queued, status_code=202)
+    if action == "install":
+        return service_manager.install_service(kind, payload)
+    if action == "uninstall":
+        return service_manager.uninstall_service(kind, payload)
+    if action in {"start", "stop", "restart"}:
+        return service_manager.control_service(kind, action, payload)
+    raise ValueError("service action must be install, uninstall, start, stop, or restart")
+
+
 @router.post("/settings/launcher/dashboard/install")
 async def api_dashboard_launch_agent_install(payload: dict | None = None):
     try:
-        return service_manager.install_service("dashboard", payload)
+        return _service_manager_mutation("dashboard", "install", payload)
     except SettingsTransactionError as e:
         return _settings_transaction_error_response(e)
     except service_manager.ServiceManagerError as e:
@@ -296,7 +309,7 @@ async def api_dashboard_launch_agent_install(payload: dict | None = None):
 @router.post("/settings/launcher/dashboard/uninstall")
 async def api_dashboard_launch_agent_uninstall(payload: dict | None = None):
     try:
-        return service_manager.uninstall_service("dashboard", payload)
+        return _service_manager_mutation("dashboard", "uninstall", payload)
     except SettingsTransactionError as e:
         return _settings_transaction_error_response(e)
     except service_manager.ServiceManagerError as e:
@@ -320,7 +333,7 @@ async def api_rag_launch_agent_preview():
 @router.post("/settings/launcher/rag/install")
 async def api_rag_launch_agent_install(payload: dict | None = None):
     try:
-        return service_manager.install_service("rag", payload)
+        return _service_manager_mutation("rag", "install", payload)
     except SettingsTransactionError as e:
         return _settings_transaction_error_response(e)
     except service_manager.ServiceManagerError as e:
@@ -335,7 +348,7 @@ async def api_rag_launch_agent_install(payload: dict | None = None):
 @router.post("/settings/launcher/rag/uninstall")
 async def api_rag_launch_agent_uninstall(payload: dict | None = None):
     try:
-        return service_manager.uninstall_service("rag", payload)
+        return _service_manager_mutation("rag", "uninstall", payload)
     except SettingsTransactionError as e:
         return _settings_transaction_error_response(e)
     except service_manager.ServiceManagerError as e:
@@ -361,13 +374,7 @@ async def api_service_manager_preview(kind: str):
 @router.post("/settings/services/{kind}/{action}")
 async def api_service_manager_action(kind: str, action: str, payload: dict | None = None):
     try:
-        if action == "install":
-            return service_manager.install_service(kind, payload)
-        if action == "uninstall":
-            return service_manager.uninstall_service(kind, payload)
-        if action in {"start", "stop", "restart"}:
-            return service_manager.control_service(kind, action, payload)
-        raise ValueError("service action must be install, uninstall, start, stop, or restart")
+        return _service_manager_mutation(kind, action, payload)
     except SettingsTransactionError as e:
         return _settings_transaction_error_response(e)
     except service_manager.ServiceManagerError as e:

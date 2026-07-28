@@ -85,10 +85,15 @@ macOS 安装向导会依次处理：
 5. 本地或云端 Embedding 配置；
 6. macOS Dashboard 与调度服务。
 
-Linux 使用非交互默认值，也可在 `--` 后传入选项。Dashboard 与调度服务
-安装为用户级 systemd unit。存在控制终端时，安装器会在请求当前用户的
-linger 前明确询问，且绝不调用 `sudo`；非交互安装默认保持现状，除非明确
-使用 `--enable-linger` 或 `--require-linger`。
+Linux 全新安装使用默认值，也可在 `--` 后传入选项。Dashboard 与调度服务
+安装为用户级 systemd unit。公开入口选中已有 managed Runtime 时，会先展示
+固定到精确 commit 的升级计划，并通过控制终端请求确认；没有控制终端时以
+状态码 2 退出且不改动 Runtime，而是输出固定到所选源码 URL、commit、
+Runtime 与 cache 的 `actanara update --dry-run` 和
+`actanara update --apply` 命令。全新安装存在
+控制终端时，安装器还会在请求当前用户的 linger 前明确询问，且绝不调用
+`sudo`；非交互全新安装默认保持 linger 现状，除非明确使用
+`--enable-linger` 或 `--require-linger`。
 
 公开安装 locale 使用 `zh-CN` 或 `en-US`；Runtime 内部 Pipeline profile 使用 `zh` 或 `en`。用户通常只需在安装向导中选择语言，不应手工混写这两组值。
 
@@ -342,6 +347,11 @@ linger 或删除用户自有 unit。
 actanara update --dry-run --ref <full-commit-sha>
 actanara update --apply --ref <full-commit-sha>
 ```
+
+Linux 上显式选择 `--source-url`/`--ref` 时，bootstrap 旁边的 checkout
+不会成为源码；bootstrap 只负责启动执行。installer cache 的规范化
+`origin` 必须与请求一致，在线 fetch 与离线 cache 复用也都必须解析并部署
+精确 commit。
 
 更新前：
 

@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 import re
+import threading
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -26,6 +27,7 @@ from .secret_store import delete_secret, store_secret
 SETTINGS_TRANSACTION_SCHEMA_VERSION = 1
 SETTINGS_TRANSACTION_TERMINAL_STATUSES = {"committed", "compensated"}
 MISSING_RESOURCE_HASH = "missing"
+_LOCAL_TRANSACTION_LOCKS = threading.local()
 
 
 @dataclass(frozen=True)
@@ -60,15 +62,13 @@ def settings_transaction_checkpoint(phase: str, transaction_id: str) -> None:
     """No-op production checkpoint patched by crash-window tests."""
 
 
-def execute_settings_transaction(
+@contextmanager
+def settings_mutation_barrier(
     paths: RuntimePaths,
-    prepare: Callable[[str, bytes | None, bytes | None], SettingsTransactionPlan],
     *,
-    verify: Callable[[], None] | None = None,
-    precommit_side_effects: Callable[[dict], Callable[[], None] | None] | None = None,
-    apply_side_effects: Callable[[], Callable[[], None] | None] | None = None,
-) -> dict:
-    """Prepare, CAS-commit, verify, and finalize one Settings bundle."""
+    pretransaction_side_effects: Callable[[], None] | None = None,
+) -> Iterator[list[dict]]:
+    """Serialize a Settings mutation and recover older durable journals first."""
 
     with _transaction_lock(paths):
         recovery = _recover_settings_transactions_locked(paths)
@@ -87,11 +87,35 @@ def execute_settings_transaction(
                     "status": "recovery-blocked",
                     "phase": "stale-recovery",
                     "conflict": blocked.get("status") == "conflict",
-                    "compensation": blocked.get("compensation") or {"status": blocked.get("status")},
+                    "compensation": blocked.get("compensation")
+                    or {"status": blocked.get("status")},
                 },
                 cause_type="stale-transaction",
             )
+        # Coupled systemd journals depend on the Settings transaction outcome.
+        # Resolve Settings first: an active journal restores Settings-before,
+        # while a terminal commit leaves Settings-after authoritative.
+        if pretransaction_side_effects is not None:
+            pretransaction_side_effects()
+        yield recovery
 
+
+def execute_settings_transaction(
+    paths: RuntimePaths,
+    prepare: Callable[[str, bytes | None, bytes | None], SettingsTransactionPlan],
+    *,
+    verify: Callable[[], None] | None = None,
+    pretransaction_side_effects: Callable[[], None] | None = None,
+    precommit_side_effects: Callable[[dict], Callable[[], None] | None] | None = None,
+    postcommit_side_effects: Callable[[dict], None] | None = None,
+    apply_side_effects: Callable[[], Callable[[], None] | None] | None = None,
+) -> dict:
+    """Prepare, CAS-commit, verify, and finalize one Settings bundle."""
+
+    with settings_mutation_barrier(
+        paths,
+        pretransaction_side_effects=pretransaction_side_effects,
+    ) as recovery:
         settings_path = paths.config_dir / "settings.json"
         manifest_path = paths.config_dir / "runtime.json"
         settings_before = _read_optional_bytes(settings_path)
@@ -145,6 +169,14 @@ def execute_settings_transaction(
             ) from None
 
         cleanup_side_effects: list[Callable[[], None]] = []
+        transaction_context = {
+            "id": transaction_id,
+            "settingsBeforeHash": resources["settings"]["beforeHash"],
+            "settingsAfterHash": resources["settings"]["afterHash"],
+            "runtimeManifestBeforeHash": resources["runtimeManifest"]["beforeHash"],
+            "runtimeManifestAfterHash": resources["runtimeManifest"]["afterHash"],
+        }
+        success_summary: dict | None = None
         try:
             settings_transaction_checkpoint("after-journal-created", transaction_id)
 
@@ -161,15 +193,7 @@ def execute_settings_transaction(
             settings_transaction_checkpoint("after-secrets-created", transaction_id)
 
             if precommit_side_effects is not None:
-                cleanup = precommit_side_effects(
-                    {
-                        "id": transaction_id,
-                        "settingsBeforeHash": resources["settings"]["beforeHash"],
-                        "settingsAfterHash": resources["settings"]["afterHash"],
-                        "runtimeManifestBeforeHash": resources["runtimeManifest"]["beforeHash"],
-                        "runtimeManifestAfterHash": resources["runtimeManifest"]["afterHash"],
-                    }
-                )
+                cleanup = precommit_side_effects(transaction_context)
                 if cleanup is not None:
                     cleanup_side_effects.append(cleanup)
             _advance_journal(transaction_dir, journal, "precommit-side-effects-applied")
@@ -205,7 +229,7 @@ def execute_settings_transaction(
             journal["status"] = "committed"
             _advance_journal(transaction_dir, journal, "committed")
             settings_transaction_checkpoint("after-finalize", transaction_id)
-            return _success_summary(journal, recovery)
+            success_summary = _success_summary(journal, recovery)
         except Exception as error:
             phase = str(journal.get("phase") or "unknown")
             try:
@@ -234,6 +258,15 @@ def execute_settings_transaction(
                 "compensation": compensation,
             }
             raise SettingsTransactionError(summary, cause_type=type(error).__name__) from None
+        if postcommit_side_effects is not None:
+            # Settings-after is durable and must never be compensated from
+            # this point. Keep the Settings lock held while coupled external
+            # journals acknowledge the same postcondition, preventing a newer
+            # Settings commit from invalidating their before/after CAS.
+            postcommit_side_effects(transaction_context)
+        if success_summary is None:
+            raise RuntimeError("settings transaction completed without a summary")
+        return success_summary
 
 
 def recover_settings_transactions(paths: RuntimePaths) -> list[dict]:
@@ -527,11 +560,25 @@ def _transaction_lock(paths: RuntimePaths) -> Iterator[None]:
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.chmod(root, 0o700)
     lock_path = root / ".lock"
-    with lock_path.open("a+b") as handle:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+    key = str(lock_path.absolute())
+    held = getattr(_LOCAL_TRANSACTION_LOCKS, "held", None)
+    if held is None:
+        held = {}
+        _LOCAL_TRANSACTION_LOCKS.held = held
+    if key in held:
+        held[key] += 1
         try:
             yield
         finally:
+            held[key] -= 1
+        return
+    with lock_path.open("a+b") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        held[key] = 1
+        try:
+            yield
+        finally:
+            held.pop(key, None)
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 

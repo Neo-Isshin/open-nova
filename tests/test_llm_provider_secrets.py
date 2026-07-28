@@ -154,10 +154,57 @@ class LlmProviderSecretIsolationTests(unittest.TestCase):
             secret_ref = saved["rag"]["embedding"]["secretRef"]
 
             self.assertEqual(secret_ref["backend"], "runtime-file")
-            self.assertEqual(secret_ref, rag_embedding_api_key_ref(str(paths.home), provider_id="example-cloud").as_dict())
+            canonical_ref = rag_embedding_api_key_ref(
+                str(paths.home),
+                provider_id="example-cloud",
+            ).as_dict()
+            if secret_ref != canonical_ref:
+                transaction_id = saved["settingsTransaction"]["id"]
+                self.assertTrue(secret_ref["account"].startswith("settings-tx-"))
+                self.assertTrue(secret_ref["account"].endswith(transaction_id))
+            else:
+                self.assertEqual(secret_ref, canonical_ref)
             self.assertNotIn(str(paths.home), json.dumps(secret_ref))
             self.assertNotIn(value, raw_text)
             self.assertNotIn("apiKey", json.loads(raw_text)["rag"]["embedding"])
+            self.assertEqual(read_secret(secret_ref, runtime_home=paths.home), value)
+
+    def test_linux_cloud_embedding_transaction_ref_is_journal_owned(self):
+        value = "synthetic-linux-cloud-embedding-value"
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            os.environ,
+            {"ACTANARA_SECRET_BACKEND": "runtime-file"},
+        ), patch("data_foundation.settings.platform.system", return_value="Linux"):
+            paths = initialize_home(Path(tmp) / "Runtime")
+            saved = write_settings(
+                {
+                    "rag": {
+                        "embedding": {
+                            "mode": "cloud",
+                            "provider": "cloud",
+                            "providerId": "example-cloud",
+                            "endpoint": "https://embedding.invalid",
+                            "apiKey": value,
+                        }
+                    }
+                },
+                paths,
+            )
+            transaction_id = saved["settingsTransaction"]["id"]
+            secret_ref = saved["rag"]["embedding"]["secretRef"]
+            journal = json.loads(
+                (
+                    paths.state_dir
+                    / "settings-transactions"
+                    / transaction_id
+                    / "journal.json"
+                ).read_text(encoding="utf-8")
+            )
+
+            self.assertEqual(saved["settingsTransaction"]["status"], "committed")
+            self.assertTrue(secret_ref["account"].startswith("settings-tx-"))
+            self.assertTrue(secret_ref["account"].endswith(transaction_id))
+            self.assertIn(secret_ref, journal["ownedSecretRefs"])
             self.assertEqual(read_secret(secret_ref, runtime_home=paths.home), value)
 
     def test_readable_legacy_keychain_ref_migrates_without_delete(self):

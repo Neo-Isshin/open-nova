@@ -229,13 +229,22 @@ run_platform_adapter() {
       setup_error "platform adapter not found: $adapter_file"
       exit 2
     fi
-    "$ADAPTER_SHELL" "$adapter_file" "$@"
+    if [ "$ADAPTER_PATH" = "install/bootstrap-linux.sh" ]; then
+      ACTANARA_INSTALL_PUBLIC_ENTRY=1 "$ADAPTER_SHELL" "$adapter_file" "$@"
+    else
+      "$ADAPTER_SHELL" "$adapter_file" "$@"
+    fi
     return $?
   fi
 
   download_exact_adapter
   adapter_file="$DOWNLOADED_ADAPTER"
-  "$ADAPTER_SHELL" "$adapter_file" --source-url "$SOURCE_URL" --ref "$SOURCE_REF" "$@"
+  if [ "$ADAPTER_PATH" = "install/bootstrap-linux.sh" ]; then
+    ACTANARA_INSTALL_PUBLIC_ENTRY=1 "$ADAPTER_SHELL" "$adapter_file" \
+      --source-url "$SOURCE_URL" --ref "$SOURCE_REF" "$@"
+  else
+    "$ADAPTER_SHELL" "$adapter_file" --source-url "$SOURCE_URL" --ref "$SOURCE_REF" "$@"
+  fi
 }
 
 parse_setup_options "$@"

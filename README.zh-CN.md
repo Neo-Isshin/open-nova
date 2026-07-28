@@ -17,6 +17,7 @@
   <a href="https://neo-isshin.github.io/actanara/"><img src="https://img.shields.io/badge/Website-GitHub%20Pages-2563EB" alt="Website"></a>
   <a href="https://github.com/Neo-Isshin/actanara/releases/latest"><img src="https://img.shields.io/github/v/release/Neo-Isshin/actanara?display_name=tag&amp;sort=semver" alt="最新稳定 Release"></a>
   <a href="https://neo-isshin.github.io/actanara/dashboard-demo/"><img src="https://img.shields.io/badge/Demo-在线交互-7C3AED" alt="在线交互 Dashboard Demo"></a>
+  <a href="#linux-support"><img src="https://img.shields.io/badge/Linux-Debian%20x64%20verified-FCC624?logo=linux&amp;logoColor=111827" alt="Linux 支持：已在 Debian x86_64 验证"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-16A34A" alt="License"></a>
   <a href="https://discord.gg/JvJHngZWz"><img src="https://img.shields.io/badge/Discord-加入-5865F2" alt="Discord"></a>
 </p>
@@ -24,6 +25,7 @@
 <p align="center">
   <a href="https://neo-isshin.github.io/actanara/dashboard-demo/"><strong>体验在线 Dashboard</strong></a> ·
   <a href="#install-actanara"><strong>安装 Actanara</strong></a> ·
+  <a href="#linux-support"><strong>Linux 支持</strong></a> ·
   <a href="docs/local-operations-runbook.zh-CN.md">中文操作 Runbook</a>
 </p>
 
@@ -72,6 +74,12 @@ curl -fsSL https://raw.githubusercontent.com/Neo-Isshin/actanara/main/install/se
 user unit 状态，遇到定义漂移或非 Actanara unit 时保守失败。第一次了解 Actanara？可以先体验
 [在线 Dashboard Demo](https://neo-isshin.github.io/actanara/dashboard-demo/)，再决定是否安装。
 
+Linux 公开入口发现已有 managed Runtime 时：存在控制终端会先展示固定到
+精确 commit 的升级计划，再询问是否执行；没有控制终端则以状态码 2
+退出、不改动 Runtime，并输出可直接复制的 `actanara update --dry-run` 与
+`actanara update --apply` 精确命令，其中包含已解析的源码 URL、commit、
+Runtime 与 installer cache。
+
 稳定 CLI shim 为 `~/.actanara/bin/actanara`，默认还会建立
 `~/.local/bin/actanara` 链接。macOS 可用 `--no-shell-path` 或
 `--shell-path-file /path/to/profile` 控制受管理的 profile 区块；Linux 的
@@ -81,6 +89,42 @@ user unit 状态，遇到定义漂移或非 Actanara unit 时保守失败。第�
 
 安装器写入路径以及 launchd/systemd 注册边界见
 <a href="docs/local-operations-runbook.zh-CN.md">中文本地操作 Runbook</a>。
+
+<a id="linux-support"></a>
+## 🐧 Linux 支持
+
+Actanara 为使用 `systemd --user` 的 Debian 类主机提供原生、非 root 的
+Linux 路径，并不是 macOS 兼容层。当前发布门禁在 Debian 13 x86_64、
+CPython 3.13 与 systemd 257 上执行；依赖锁也提供 arm64 目标，而真实主机
+功能门禁覆盖的是 x86_64。
+
+| 能力 | Linux 行为 |
+| :--- | :--- |
+| **安装与更新** | 公开 `setup.sh` 入口支持受保护的全新安装、精确 ref/仅源码更新、按锁依赖升级和显式修复。新 generation 先在 staging 中构建再原子提升；失败后旧 Runtime 仍可恢复。 |
+| **用户边界与服务** | 请以普通登录用户运行 `setup.sh`，不要通过 `sudo` 启动。Actanara 自身不会调用 `sudo`；Dashboard、可选 `nova-RAG` 与调度任务使用由 `systemctl --user` 控制的用户级 systemd unit。 |
+| **RAG readiness** | 全新安装可启用经审计的 CPU-only 本地 profile，使用 384 维的 `intfloat/multilingual-e5-small`。credential-backed Provider 尚未配置时，fresh managed cloud RAG 会保守拒绝。安装器只有在受管 listener、source commit、provider profile、模型与健康响应全部一致后才报告成功。 |
+| **端口与无桌面主机** | Dashboard 与 RAG 默认只监听 loopback 的 3036 与 3037。无桌面主机应通过 SSH 转发已配置的 Dashboard 端口，并让本地端口保持一致，以满足浏览器 Origin 检查。 |
+| **会话生命周期** | 非交互安装不会修改 systemd linger；只有显式选项或交互确认后才会请求 linger。 |
+
+无桌面主机使用默认 Dashboard 端口时：
+
+```bash
+ssh -N -L 3036:127.0.0.1:3036 user@linux-host
+# 然后在本机打开 http://127.0.0.1:3036/dashboard。
+```
+
+如果修改过 Dashboard 端口，tunnel 两端都应使用实际配置值。Linux 快速
+健康检查：
+
+```bash
+actanara doctor --installer
+actanara doctor --scheduler
+actanara doctor --rag  # 启用 nova-RAG 时运行。
+```
+
+离线全新安装会在写入 release generation 前预检 Python/pip bootstrap 与
+可信依赖缓存；缺少必要 bootstrap 材料时会无残留停止。Linux 使用所选的
+系统 Python，不安装托管 Python Runtime。
 
 ## 🎥 快速开始
 
@@ -149,7 +193,7 @@ nova-RAG（可选）→ 外部 Runtime 只读检索
 ## 💻 支持范围
 
 - 🍎 **macOS 保持一等支持**：引导式安装、更新、本地 nova-RAG、Dashboard 服务和托管调度继续使用原有用户级 `LaunchAgent` 行为。
-- 🐧 **Linux Core 边界明确**：Debian 类 `systemd --user` 主机的 x86_64 与 arm64 锁目标支持全新安装及 cloud/CPU-only 本地 Embedding RAG；受保护升级/修复已在 Debian x86_64、CPython 3.13 上通过发布门禁，引导式向导与托管 Python bootstrap 仍仅属于 macOS。
+- 🐧 **Linux Core 边界明确**：Debian 类 `systemd --user` 主机提供 x86_64 与 arm64 锁目标，并支持经审计的 CPU-only 本地 Embedding RAG profile；credential-backed Provider 尚未配置时，fresh managed cloud RAG 会保守拒绝。受保护升级/修复已在 Debian x86_64、CPython 3.13 上通过发布门禁，引导式向导与托管 Python bootstrap 仍仅属于 macOS。
 - 🛠️ **基础工具**：需要 `git`、`curl`，macOS 另需 `zsh`，Linux 使用 POSIX `sh`；无需 `sudo`。
 - 🐍 **Python**：macOS 支持 Python ≥ 3.11，并可安装校验后的托管 Python；当前经审计的 Linux lock 面向 CPython 3.13。
 - 🌐 **网络与磁盘**：安装期间需访问 GitHub、Python 包索引及你的模型服务；启用本地 `nova-RAG` 时首次可能下载模型权重。
@@ -246,6 +290,11 @@ actanara update --apply
 ```
 
 更新器在依赖一致时复用 venv、否则从带 hash 的 lock 重建；venv 复用、`--source-only/--force-rebuild/--offline`、源码获取与 commit 固定等细节，见 Runbook 的「更新」一节。Actanara 暂未提供一键卸载器，请勿直接删除 `~/.actanara`，正确卸载步骤见 Runbook「卸载边界」一节。
+
+Linux 上显式使用 `--source-url` 或 `--ref` 时，邻接 bootstrap 文件只作为
+执行入口，不会被当成所选源码。installer cache 中规范化后的 Git `origin`
+以及精确 fetched/cached commit 会在在线、离线模式下都先完成校验，之后才
+运行安装器。
 
 Linux 常规更新要求 Actanara 管理的 systemd 定义已对齐，并逐个保持 unit
 原有 enabled/active 状态。若可信 Runtime 配置或受管理定义发生漂移，请按

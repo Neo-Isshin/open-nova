@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+from datetime import datetime
 import errno
 import hashlib
 import json
@@ -16,6 +17,7 @@ import os
 from pathlib import Path
 import platform
 import re
+import signal
 import shutil
 import stat
 import subprocess
@@ -24,7 +26,7 @@ import sysconfig
 import tempfile
 import tomllib
 from typing import Any, Iterable, Sequence
-from urllib.parse import unquote, urlsplit
+from urllib.parse import parse_qsl, unquote, urlencode, urlsplit, urlunsplit
 
 
 PRODUCT = "actanara"
@@ -38,6 +40,8 @@ WHEELHOUSE_MANIFEST_NAME = ".actanara-wheelhouse.json"
 MAX_JSON_BYTES = 16 * 1024 * 1024
 MAX_PYPROJECT_BYTES = 2 * 1024 * 1024
 MAX_SUBPROCESS_JSON_BYTES = 16 * 1024 * 1024
+MAX_PIP_ERROR_SUMMARY_CHARS = 1600
+MAX_PIP_DIAGNOSTIC_STREAM_BYTES = 512 * 1024
 HEX_SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 SAFE_ID_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,127}\Z")
 SAFE_VERSION_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9.!+_-]{0,127}\Z")
@@ -49,6 +53,18 @@ PYPI_ARTIFACT_HOST = "files.pythonhosted.org"
 PYTORCH_CPU_ARTIFACT_HOSTS = frozenset(
     {"download.pytorch.org", "download-r2.pytorch.org"}
 )
+SENSITIVE_ENVIRONMENT_NAME_RE = re.compile(
+    r"(?:TOKEN|SECRET|PASSWORD|PASSWD|API[_-]?KEY|CREDENTIAL|AUTHORIZATION)",
+    re.IGNORECASE,
+)
+SENSITIVE_ASSIGNMENT_RE = re.compile(
+    r"(?i)\b(token|secret|password|passwd|api[_-]?key|credential|authorization)"
+    r"(\s*[=:]\s*)([^\s,;&]+)"
+)
+AUTHORIZATION_VALUE_RE = re.compile(
+    r"(?i)\b(authorization\s*:\s*(?:bearer|basic)\s+)([^\s]+)"
+)
+HTTP_URL_RE = re.compile(r"(?i)https?://[^\s<>'\"\]\[()]+")
 
 LOCK_ROOT_FIELDS = {
     "schemaVersion",
@@ -2092,7 +2108,163 @@ def _pip_environment() -> dict[str, str]:
     return environment
 
 
-def _run_pip(command: Sequence[str], *, timeout: int, code: str) -> None:
+def _bounded_diagnostic_bytes(value: bytes | str | None) -> bytes:
+    if value is None:
+        return b""
+    raw = value.encode("utf-8", errors="replace") if isinstance(value, str) else bytes(value)
+    if len(raw) <= MAX_PIP_DIAGNOSTIC_STREAM_BYTES:
+        return raw
+    half = MAX_PIP_DIAGNOSTIC_STREAM_BYTES // 2
+    omitted = len(raw) - (half * 2)
+    marker = f"\n... [{omitted} diagnostic bytes omitted] ...\n".encode("ascii")
+    return raw[:half] + marker + raw[-half:]
+
+
+def _redact_diagnostic_url(match: re.Match[str]) -> str:
+    raw = match.group(0)
+    try:
+        parsed = urlsplit(raw)
+        host = parsed.hostname or ""
+        if not host:
+            return "[redacted-url]"
+        if ":" in host and not host.startswith("["):
+            host = f"[{host}]"
+        if parsed.port is not None:
+            host = f"{host}:{parsed.port}"
+        netloc = f"[redacted]@{host}" if parsed.username is not None else host
+        query = urlencode(
+            [(key, "[redacted]") for key, _value in parse_qsl(parsed.query, keep_blank_values=True)]
+        )
+        fragment = "[redacted]" if parsed.fragment else ""
+        return urlunsplit((parsed.scheme, netloc, parsed.path, query, fragment))
+    except (TypeError, ValueError):
+        return "[redacted-url]"
+
+
+def _sanitize_pip_diagnostic(value: bytes | str | None) -> str:
+    raw = _bounded_diagnostic_bytes(value)
+    text = raw.decode("utf-8", errors="replace").replace("\x00", "�")
+    text = HTTP_URL_RE.sub(_redact_diagnostic_url, text)
+    text = AUTHORIZATION_VALUE_RE.sub(r"\1[redacted]", text)
+    text = SENSITIVE_ASSIGNMENT_RE.sub(r"\1\2[redacted]", text)
+    sensitive_values = sorted(
+        {
+            str(value)
+            for key, value in os.environ.items()
+            if SENSITIVE_ENVIRONMENT_NAME_RE.search(key)
+            and isinstance(value, str)
+            and len(value) >= 4
+        },
+        key=len,
+        reverse=True,
+    )
+    for secret in sensitive_values:
+        text = text.replace(secret, "[redacted]")
+    return text
+
+
+def _write_pip_diagnostic(
+    path: Path | str | None,
+    *,
+    command: Sequence[str],
+    returncode: int | str,
+    stdout: bytes | str | None,
+    stderr: bytes | str | None,
+) -> Path | None:
+    if path is None:
+        return None
+    target = Path(path).expanduser().absolute()
+    target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    command_text = _sanitize_pip_diagnostic(
+        json.dumps([str(item) for item in command], ensure_ascii=False)
+    )
+    payload = (
+        f"=== isolated pip failure {datetime.now().astimezone().isoformat()} ===\n"
+        f"returncode: {returncode}\n"
+        f"command: {command_text}\n"
+        "--- stdout ---\n"
+        f"{_sanitize_pip_diagnostic(stdout)}\n"
+        "--- stderr ---\n"
+        f"{_sanitize_pip_diagnostic(stderr)}\n"
+    ).encode("utf-8", errors="replace")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(target, flags, 0o600)
+    try:
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.getuid()
+            or stat.S_IMODE(metadata.st_mode) & 0o077
+        ):
+            raise OSError("dependency diagnostic log is not a private regular file")
+        remaining = memoryview(payload)
+        while remaining:
+            written = os.write(descriptor, remaining)
+            if written <= 0:
+                raise OSError("dependency diagnostic log write did not make progress")
+            remaining = remaining[written:]
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    return target
+
+
+def _try_write_pip_diagnostic(
+    path: Path | str | None,
+    **details: Any,
+) -> Path | None:
+    try:
+        return _write_pip_diagnostic(path, **details)
+    except OSError:
+        return None
+
+
+def _pip_failure_message(
+    *,
+    returncode: int | str,
+    stdout: bytes | str | None,
+    stderr: bytes | str | None,
+    diagnostic_log: Path | None,
+) -> str:
+    detail = _sanitize_pip_diagnostic(stderr).strip()
+    if not detail:
+        detail = _sanitize_pip_diagnostic(stdout).strip()
+    detail = re.sub(r"\s+", " ", detail)
+    prefix = f"isolated pip command failed with exit code {returncode}"
+    suffix = f" (diagnostic log: {diagnostic_log})" if diagnostic_log is not None else ""
+    available = MAX_PIP_ERROR_SUMMARY_CHARS - len(prefix) - len(suffix) - 2
+    if detail and available > 1:
+        if len(detail) > available:
+            detail = detail[: max(1, available - 1)].rstrip() + "…"
+        return f"{prefix}: {detail}{suffix}"
+    return (prefix + suffix)[:MAX_PIP_ERROR_SUMMARY_CHARS]
+
+
+def _run_pip(
+    command: Sequence[str],
+    *,
+    timeout: int,
+    code: str,
+    diagnostic_log: Path | str | None = None,
+) -> None:
+    child_options: dict[str, Any] = {}
+    if sys.platform == "linux":
+        parent_pid = os.getpid()
+
+        def configure_parent_death_signal() -> None:  # pragma: no cover - Debian only
+            import ctypes
+
+            libc = ctypes.CDLL(None, use_errno=True)
+            if libc.prctl(1, signal.SIGKILL, 0, 0, 0) != 0:
+                os._exit(126)
+            if os.getppid() != parent_pid:
+                os._exit(126)
+
+        child_options["preexec_fn"] = configure_parent_death_signal
     try:
         result = subprocess.run(
             list(command),
@@ -2101,11 +2273,42 @@ def _run_pip(command: Sequence[str], *, timeout: int, code: str) -> None:
             check=False,
             timeout=timeout,
             env=_pip_environment(),
+            **child_options,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
-        raise _error(code, "isolated pip command failed to execute") from exc
+        stdout = getattr(exc, "stdout", None)
+        stderr = getattr(exc, "stderr", None)
+        written = _try_write_pip_diagnostic(
+            diagnostic_log,
+            command=command,
+            returncode="not-started" if isinstance(exc, OSError) else "timeout",
+            stdout=stdout,
+            stderr=stderr,
+        )
+        message = _pip_failure_message(
+            returncode="not-started" if isinstance(exc, OSError) else "timeout",
+            stdout=stdout,
+            stderr=stderr,
+            diagnostic_log=written,
+        )
+        raise _error(code, message) from exc
     if result.returncode != 0:
-        raise _error(code, f"isolated pip command failed with exit code {result.returncode}")
+        written = _try_write_pip_diagnostic(
+            diagnostic_log,
+            command=command,
+            returncode=result.returncode,
+            stdout=result.stdout,
+            stderr=result.stderr,
+        )
+        raise _error(
+            code,
+            _pip_failure_message(
+                returncode=result.returncode,
+                stdout=result.stdout,
+                stderr=result.stderr,
+                diagnostic_log=written,
+            ),
+        )
 
 
 def materialize_dependency_cache(
@@ -2115,6 +2318,7 @@ def materialize_dependency_cache(
     python: Path | str,
     offline: bool = False,
     timeout: int = 900,
+    diagnostic_log: Path | str | None = None,
 ) -> dict[str, Any]:
     if offline:
         status = dependency_cache_status(cache_root, selection)
@@ -2153,7 +2357,12 @@ def materialize_dependency_cache(
             "--requirement",
             str(requirement_path),
         ]
-        _run_pip(command, timeout=timeout, code="cache-materialization-failed")
+        _run_pip(
+            command,
+            timeout=timeout,
+            code="cache-materialization-failed",
+            diagnostic_log=diagnostic_log,
+        )
         for path in staging.iterdir():
             if path.is_file() and not path.is_symlink():
                 os.chmod(path, 0o400)
@@ -2182,6 +2391,7 @@ def install_locked_dependencies(
     *,
     venv_python: Path | str,
     timeout: int = 900,
+    diagnostic_log: Path | str | None = None,
 ) -> dict[str, Any]:
     status = dependency_cache_status(cache_root, selection)
     if status["status"] != "hit":
@@ -2207,7 +2417,12 @@ def install_locked_dependencies(
             "--requirement",
             str(requirement_path),
         ]
-        _run_pip(command, timeout=timeout, code="locked-install-failed")
+        _run_pip(
+            command,
+            timeout=timeout,
+            code="locked-install-failed",
+            diagnostic_log=diagnostic_log,
+        )
     validation = validate_live_distributions(venv_python, selection)
     return {
         "status": "installed",

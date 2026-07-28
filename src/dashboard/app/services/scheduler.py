@@ -128,6 +128,40 @@ def install_system_timer(
 ) -> dict:
     payload = payload if isinstance(payload, dict) else {}
     paths = load_paths()
+    if platform.system() == "Linux" and payload.get("dryRun") is not True:
+        from data_foundation.runtime_mutation import (
+            RuntimeMutationBusy,
+            RuntimeMutationUnsafe,
+            require_runtime_mutation_owner,
+            runtime_mutation_guard,
+        )
+
+        try:
+            with runtime_mutation_guard(paths.home, blocking=False):
+                require_runtime_mutation_owner(paths.home, owner_id=None)
+                return _install_system_timer_guarded(
+                    payload,
+                    paths=paths,
+                    systemctl_runner=systemctl_runner,
+                    unit_dir=unit_dir,
+                )
+        except (RuntimeMutationBusy, RuntimeMutationUnsafe) as exc:
+            raise RuntimeError(str(exc)) from exc
+    return _install_system_timer_guarded(
+        payload,
+        paths=paths,
+        systemctl_runner=systemctl_runner,
+        unit_dir=unit_dir,
+    )
+
+
+def _install_system_timer_guarded(
+    payload: dict[str, Any],
+    *,
+    paths,
+    systemctl_runner=None,
+    unit_dir: Path | None = None,
+) -> dict:
     settings = read_settings(paths, redact_secrets=False)
     schedule = settings.get("schedule", {})
     timer = schedule.get("systemTimer", {}) if isinstance(schedule.get("systemTimer"), dict) else {}
@@ -205,6 +239,40 @@ def uninstall_system_timer(
 ) -> dict:
     payload = payload if isinstance(payload, dict) else {}
     paths = load_paths()
+    if platform.system() == "Linux" and payload.get("dryRun") is not True:
+        from data_foundation.runtime_mutation import (
+            RuntimeMutationBusy,
+            RuntimeMutationUnsafe,
+            require_runtime_mutation_owner,
+            runtime_mutation_guard,
+        )
+
+        try:
+            with runtime_mutation_guard(paths.home, blocking=False):
+                require_runtime_mutation_owner(paths.home, owner_id=None)
+                return _uninstall_system_timer_guarded(
+                    payload,
+                    paths=paths,
+                    systemctl_runner=systemctl_runner,
+                    unit_dir=unit_dir,
+                )
+        except (RuntimeMutationBusy, RuntimeMutationUnsafe) as exc:
+            raise RuntimeError(str(exc)) from exc
+    return _uninstall_system_timer_guarded(
+        payload,
+        paths=paths,
+        systemctl_runner=systemctl_runner,
+        unit_dir=unit_dir,
+    )
+
+
+def _uninstall_system_timer_guarded(
+    payload: dict[str, Any],
+    *,
+    paths,
+    systemctl_runner=None,
+    unit_dir: Path | None = None,
+) -> dict:
     settings = read_settings(paths, redact_secrets=False)
     schedule = settings.get("schedule", {})
     timer = schedule.get("systemTimer", {}) if isinstance(schedule.get("systemTimer"), dict) else {}
@@ -282,6 +350,7 @@ def _execute_systemd_scheduler_handoff(
 ) -> dict[str, Any]:
     """Commit systemd timer definitions and scheduler settings as one handoff."""
 
+    expected_schedule = json.loads(json.dumps(schedule))
     desired_units = scheduler_units(paths, schedule, timer)
     desired_names = [unit.name for unit in desired_units]
     recorded_names = _recorded_systemd_scheduler_names(timer)
@@ -376,19 +445,37 @@ def _execute_systemd_scheduler_handoff(
 
         return cleanup
 
+    def postcommit(_context: dict[str, str]) -> None:
+        results: list[dict[str, Any]] = holder["results"]
+        if not results:
+            raise RuntimeError("systemd scheduler handoff did not create a transaction")
+        for result in results:
+            finalize_user_unit_transaction(
+                paths,
+                str(result["transactionId"]),
+                runner=runner,
+            )
+
+    def require_schedule_unchanged(current: dict[str, Any]) -> None:
+        current_schedule = current.get("schedule")
+        if not isinstance(current_schedule, dict) or current_schedule != expected_schedule:
+            raise RuntimeError(
+                "scheduler Settings changed while the systemd handoff was prepared"
+            )
+
     try:
         saved = write_scheduler_handoff_settings(
             schedule_update,
             paths,
             precommit_side_effects=precommit,
+            postcommit_side_effects=postcommit,
+            current_validator=require_schedule_unchanged,
         )
     except SystemdUserError as exc:
         raise RuntimeError(str(exc)) from exc
     results = holder["results"]
     if not results:
         raise RuntimeError("systemd scheduler handoff did not create a transaction")
-    for result in results:
-        finalize_user_unit_transaction(paths, str(result["transactionId"]), runner=runner)
     handoff = {
         "schemaVersion": 1,
         "provider": "systemd-user",

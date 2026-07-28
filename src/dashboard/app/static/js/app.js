@@ -1497,7 +1497,7 @@ const OPERATOR_UI_TEXT = {
     installUpdate: '安装/更新',
     uninstall: '卸载',
     startupServicesTitle: '开机自启',
-    startupServicesNote: '管理当前平台的用户级服务。macOS 使用 launchd，Linux 使用 systemd user；状态、运行态和定义一致性均按系统实际结果检测。',
+    startupServicesNote: '管理当前平台的用户级服务；状态、运行态和定义一致性均由当前服务管理器的实际结果决定。',
     startupDashboardServer: 'Dashboard server',
     startupRagServer: 'nova-RAG / Embedding server',
     startupReading: '读取开机自启状态…',
@@ -1809,7 +1809,7 @@ const OPERATOR_UI_TEXT = {
     installUpdate: 'Install / Update',
     uninstall: 'Uninstall',
     startupServicesTitle: 'Startup',
-    startupServicesNote: 'Manage user services for the current platform. macOS uses launchd and Linux uses systemd user; status, runtime state, and definition alignment come from the real service manager.',
+    startupServicesNote: 'Manage user services for the current platform; status, runtime state, and definition alignment come from the active service manager.',
     startupDashboardServer: 'Dashboard server',
     startupRagServer: 'nova-RAG / Embedding server',
     startupReading: 'Reading startup status...',
@@ -6970,7 +6970,7 @@ function renderScheduleSettings(schedule, agentPrompt, showAdvanced = false) {
   const agentEnabled = schedule.enabled && schedule.mode === 'agent';
   const advancedSystemTimer = showAdvanced ? `
       <div class="settings-row"><label>${escapeHtml(labels.dashboardAggregationTime)}</label><input id="setDashboardAggregationTime" type="time" value="${escapeHtml(schedule.dashboardAggregationTime || '04:30')}"></div>
-      <div class="settings-row"><label>${escapeHtml(labels.systemTimerProvider)}</label><input id="setSystemTimerProvider" value="${escapeHtml((schedule.systemTimer || {}).provider || 'launchd')}"></div>
+      <div class="settings-row"><label>${escapeHtml(labels.systemTimerProvider)}</label><input id="setSystemTimerProvider" value="${escapeHtml((schedule.systemTimer || {}).provider || '')}"></div>
       <div class="settings-row"><label>${escapeHtml(labels.systemTimerLabel)}</label><input id="setSystemTimerLabel" value="${escapeHtml((schedule.systemTimer || {}).label || 'actanara.daily')}"></div>
       <div class="settings-note">${escapeHtml(labels.systemTimerNote)}</div>
       <div class="settings-timer-actions">
@@ -8301,10 +8301,12 @@ function collectScheduleSettingsFromModal() {
     schedule.dashboardAggregationTime = document.getElementById('setDashboardAggregationTime')?.value || '04:30';
   }
   if (document.getElementById('setSystemTimerProvider') || document.getElementById('setSystemTimerLabel')) {
-    schedule.systemTimer = {
-      provider: document.getElementById('setSystemTimerProvider')?.value || 'launchd',
+    const systemTimer = {
       label: document.getElementById('setSystemTimerLabel')?.value || 'actanara.daily',
     };
+    const provider = document.getElementById('setSystemTimerProvider')?.value?.trim() || '';
+    if (provider) systemTimer.provider = provider;
+    schedule.systemTimer = systemTimer;
   }
   return schedule;
 }

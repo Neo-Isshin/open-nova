@@ -518,7 +518,7 @@ class RagSubsystemStatusTests(unittest.TestCase):
             os.environ,
             {"ACTANARA_SECRET_BACKEND": "runtime-file"},
             clear=False,
-        ):
+        ), patch("data_foundation.settings.platform.system", return_value="Linux"):
             root = Path(tmp)
             paths = initialize_home(root / "Runtime", legacy_diary_root=root / "Diary")
             read_settings(paths, redact_secrets=False)
@@ -677,6 +677,7 @@ class RagSubsystemStatusTests(unittest.TestCase):
             )
             with (
                 patch.dict(os.environ, {"ACTANARA_HOME": str(paths.home)}, clear=False),
+                patch.object(rag_server_lifecycle, "_is_linux", return_value=False),
                 patch.object(rag_server_lifecycle, "_select_server_python", return_value="/usr/bin/python3"),
                 patch.object(
                     rag_server_lifecycle,
@@ -771,6 +772,7 @@ class RagSubsystemStatusTests(unittest.TestCase):
             state_path.write_text(json.dumps({"pid": 999999, "startedAt": "2026-06-29T00:00:00+08:00"}), encoding="utf-8")
             with (
                 patch.dict(os.environ, {"ACTANARA_HOME": str(paths.home)}, clear=False),
+                patch.object(rag_server_lifecycle, "_is_linux", return_value=False),
                 patch.object(rag_server_lifecycle, "_pid_running", return_value=False),
                 patch.object(
                     rag_server_lifecycle,
@@ -896,6 +898,7 @@ class RagSubsystemStatusTests(unittest.TestCase):
             )
             with (
                 patch.dict(os.environ, {"ACTANARA_HOME": str(paths.home)}, clear=False),
+                patch.object(rag_server_lifecycle, "_is_linux", return_value=False),
                 patch.object(rag_server_lifecycle, "_pid_running", side_effect=[True, False, False, False]),
                 patch.object(rag_server_lifecycle.os, "kill") as kill,
             ):

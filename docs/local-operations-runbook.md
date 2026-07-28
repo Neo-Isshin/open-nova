@@ -87,11 +87,18 @@ The macOS installation wizard covers, in order:
 5. Local or cloud embedding configuration;
 6. macOS Dashboard and scheduler services.
 
-Linux uses non-interactive defaults unless options are passed after `--`.
+Linux fresh installs use defaults unless options are passed after `--`.
 Dashboard and scheduler services are installed as user-level systemd units.
-With a controlling terminal, the installer asks before requesting linger for
-the current user. It never invokes `sudo`; non-interactive installs preserve
-the current state unless `--enable-linger` or `--require-linger` is explicit.
+When this public entrypoint selects an existing managed Runtime, it first shows
+the exact pinned upgrade plan and asks for confirmation through the controlling
+terminal. If no controlling terminal is available, it exits with status 2,
+does not modify the Runtime, and instead prints pinned
+`actanara update --dry-run` and `actanara update --apply` commands for the
+selected source URL, commit, Runtime, and cache. With a controlling terminal,
+a fresh installer also asks before
+requesting linger for the current user. It never invokes `sudo`; non-interactive
+fresh installs preserve the current linger state unless `--enable-linger` or
+`--require-linger` is explicit.
 
 The public installer locale uses `zh-CN` or `en-US`; the runtime's internal Pipeline profile uses `zh` or `en`. Users normally select a language in the installation wizard and should not manually mix values from these two groups.
 
@@ -353,6 +360,11 @@ Select an immutable full commit:
 actanara update --dry-run --ref <full-commit-sha>
 actanara update --apply --ref <full-commit-sha>
 ```
+
+On Linux, explicit `--source-url`/`--ref` selection never adopts the checkout
+beside the bootstrap as source. The bootstrap is only the execution entry; the
+installer cache must have a normalized `origin` matching the request, and both
+online fetches and offline cache reuse must resolve and deploy the exact commit.
 
 Before updating:
 

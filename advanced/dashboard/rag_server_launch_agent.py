@@ -12,6 +12,7 @@ import signal
 import stat
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -238,6 +239,14 @@ def run_server(args: argparse.Namespace) -> int:
     from agentic_rag.rag_server_lifecycle import read_server_process_state, start_rag_server, stop_rag_server
     from agentic_rag.rag_settings import resolve_rag_settings
 
+    if sys.platform.startswith("linux"):
+        return _run_server_linux(
+            resolve_rag_settings=resolve_rag_settings,
+            read_server_process_state=read_server_process_state,
+            start_rag_server=start_rag_server,
+            stop_rag_server=stop_rag_server,
+        )
+
     stopping = False
 
     def handle_stop(signum, frame):  # noqa: ARG001
@@ -263,6 +272,58 @@ def run_server(args: argparse.Namespace) -> int:
             print("nova-RAG server process is not running", file=sys.stderr)
             return 1
         time.sleep(5)
+    return 0
+
+
+def _run_server_linux(
+    *,
+    resolve_rag_settings,
+    read_server_process_state,
+    start_rag_server,
+    stop_rag_server,
+) -> int:
+    """Run the Linux service wrapper with cancellation-safe child ownership."""
+
+    stop_requested = threading.Event()
+
+    def handle_stop(signum, frame):  # noqa: ARG001
+        # Python delivers this on the main thread.  Keeping the handler to an
+        # event mutation lets dependency probes and cold model downloads unwind
+        # through their normal cancellation paths before the child group is
+        # terminated below.
+        stop_requested.set()
+
+    signal.signal(signal.SIGTERM, handle_stop)
+    signal.signal(signal.SIGINT, handle_stop)
+
+    settings = resolve_rag_settings()
+    result = start_rag_server(
+        settings,
+        requested_by="systemd",
+        wait_timeout_seconds=20.0,
+        cancel_event=stop_requested,
+    )
+    if stop_requested.is_set() or result.get("status") == "canceled":
+        stop_rag_server(
+            settings,
+            requested_by="systemd",
+            wait_timeout_seconds=5.0,
+        )
+        return 0
+    if not result.get("accepted"):
+        print(result.get("reason") or result.get("status") or "nova-RAG server start was not accepted", file=sys.stderr)
+        return 1
+
+    while not stop_requested.wait(5.0):
+        state = read_server_process_state(settings, probe_health=False)
+        if not state.get("running"):
+            print("nova-RAG server process is not running", file=sys.stderr)
+            return 1
+    stop_rag_server(
+        settings,
+        requested_by="systemd",
+        wait_timeout_seconds=5.0,
+    )
     return 0
 
 

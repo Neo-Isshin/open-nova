@@ -56,6 +56,7 @@ from .secret_store import (
 from .settings_transaction import (
     SettingsTransactionPlan,
     execute_settings_transaction,
+    settings_mutation_barrier,
 )
 from .time import detect_system_timezone, detect_system_timezone_authority
 
@@ -633,8 +634,7 @@ def default_external_tool_settings(home: Path | None = None) -> dict:
     return default_external_tool_settings_from_catalog(home)
 
 
-def ensure_settings(paths: RuntimePaths | None = None) -> dict:
-    paths = paths or load_paths()
+def _ensure_settings_unlocked(paths: RuntimePaths) -> dict:
     settings_path = _settings_path(paths)
     current = _read_json(settings_path)
     if current.get("schemaVersion") != SETTINGS_SCHEMA_VERSION:
@@ -651,8 +651,68 @@ def ensure_settings(paths: RuntimePaths | None = None) -> dict:
     return current
 
 
+def _read_settings_defaults_view(paths: RuntimePaths) -> dict:
+    current = _read_json(_settings_path(paths))
+    if current.get("schemaVersion") != SETTINGS_SCHEMA_VERSION:
+        return default_settings(paths)
+    merged = _deep_merge(default_settings(paths), current)
+    _preserve_legacy_manual_pipeline_gate(current, merged)
+    return merged
+
+
+def _recover_linux_systemd_settings_barrier(paths: RuntimePaths) -> None:
+    from .systemd_user import SystemdUserError, recover_user_unit_transactions
+
+    recovery = recover_user_unit_transactions(
+        paths,
+        owner_id=None,
+        _runtime_guard_held=True,
+    )
+    if any(item.get("status") in {"active", "conflict"} for item in recovery):
+        raise SystemdUserError(
+            "Settings persistence is blocked by an active or conflicting "
+            "systemd transaction"
+        )
+
+
+def ensure_settings(paths: RuntimePaths | None = None) -> dict:
+    paths = paths or load_paths()
+    if platform.system() != "Linux":
+        return _ensure_settings_unlocked(paths)
+
+    from .runtime_mutation import (
+        RuntimeMutationBusy,
+        RuntimeMutationUnsafe,
+        require_runtime_mutation_owner,
+        runtime_mutation_guard,
+    )
+
+    try:
+        with runtime_mutation_guard(paths.home, blocking=False):
+            require_runtime_mutation_owner(paths.home, owner_id=None)
+            with settings_mutation_barrier(
+                paths,
+                pretransaction_side_effects=lambda: (
+                    _recover_linux_systemd_settings_barrier(paths)
+                ),
+            ):
+                return _ensure_settings_unlocked(paths)
+    except RuntimeMutationBusy:
+        # A read that discovers additive defaults must not publish them across
+        # an install/update or service Settings transaction.
+        return _read_settings_defaults_view(paths)
+    except RuntimeMutationUnsafe as exc:
+        raise RuntimeError(str(exc)) from exc
+
+
 def read_settings(paths: RuntimePaths | None = None, *, redact_secrets: bool = True, persist_defaults: bool = True) -> dict:
     paths = paths or load_paths()
+    if platform.system() == "Linux" and not paths.config_dir.is_dir():
+        # A read-only command aimed at a missing Runtime must not initialize
+        # it.  Once initialize_home has established the managed config
+        # boundary, preserve the existing additive-default persistence
+        # contract through ensure_settings() and its mutation guard.
+        persist_defaults = False
     if persist_defaults:
         settings = ensure_settings(paths)
     else:
@@ -695,6 +755,15 @@ def _redact_llm_provider_block(
 
 def write_settings(update: dict[str, Any], paths: RuntimePaths | None = None) -> dict:
     paths = paths or load_paths()
+    if platform.system() == "Linux":
+        # Legacy/internal callers still use this unrestricted writer. Route
+        # them through the Runtime guard, Settings lock, crash journal, and
+        # pending systemd handoff recovery used by the operator APIs.
+        migrate_persisted_secret_refs(paths)
+        return _write_operator_settings_transaction(
+            paths,
+            lambda _current: copy.deepcopy(update),
+        )
     current = migrate_persisted_secret_refs(paths)
     merged, secret_writes, _ = _prepare_settings_update(
         current,
@@ -718,6 +787,45 @@ def migrate_persisted_secret_refs(paths: RuntimePaths | None = None) -> dict:
     is actually required.
     """
     paths = paths or load_paths()
+    if platform.system() == "Linux":
+        from .runtime_mutation import (
+            RuntimeMutationBusy,
+            RuntimeMutationUnsafe,
+            require_runtime_mutation_owner,
+            runtime_mutation_guard,
+        )
+
+        try:
+            with runtime_mutation_guard(paths.home, blocking=False):
+                require_runtime_mutation_owner(paths.home, owner_id=None)
+
+                with settings_mutation_barrier(
+                    paths,
+                    pretransaction_side_effects=lambda: (
+                        _recover_linux_systemd_settings_barrier(paths)
+                    ),
+                ):
+                    current = _ensure_settings_unlocked(paths)
+                    migrated = copy.deepcopy(current)
+                    _sanitize_persisted_secrets(
+                        paths,
+                        migrated,
+                        migrate_persisted_refs=True,
+                    )
+                    if migrated != current:
+                        _write_json_atomic(_settings_path(paths), migrated)
+                    return migrated
+        except RuntimeMutationBusy:
+            # Service startup and health resolution must remain read-only while
+            # a fresh/install/update or another Settings handoff owns the
+            # Runtime. Legacy refs remain directly readable for this attempt.
+            return read_settings(
+                paths,
+                redact_secrets=False,
+                persist_defaults=False,
+            )
+        except RuntimeMutationUnsafe as exc:
+            raise RuntimeError(str(exc)) from exc
     current = ensure_settings(paths)
     migrated = copy.deepcopy(current)
     _sanitize_persisted_secrets(paths, migrated, migrate_persisted_refs=True)
@@ -1075,6 +1183,8 @@ def _write_operator_settings_transaction(
     *,
     readiness_verifier: Callable[[], None] | None = None,
     precommit_side_effects: Callable[[dict], Callable[[], None] | None] | None = None,
+    postcommit_side_effects: Callable[[dict], None] | None = None,
+    runtime_mutation_owner_id: str | None = None,
 ) -> dict:
     def prepare(
         transaction_id: str,
@@ -1115,13 +1225,62 @@ def _write_operator_settings_transaction(
             garbage_collection_candidates=garbage_collection_candidates,
         )
 
-    summary = execute_settings_transaction(
-        paths,
-        prepare,
-        verify=readiness_verifier,
-        precommit_side_effects=precommit_side_effects,
-        apply_side_effects=lambda: _ensure_runtime_manifest_directories(paths),
-    )
+    def execute() -> dict:
+        pretransaction = None
+        if platform.system() == "Linux":
+            def recover_systemd_handoffs() -> None:
+                from .systemd_user import (
+                    SystemdUserError,
+                    recover_user_unit_transactions,
+                )
+
+                recovery = recover_user_unit_transactions(
+                    paths,
+                    owner_id=runtime_mutation_owner_id,
+                    _runtime_guard_held=True,
+                )
+                if any(
+                    item.get("status") in {"active", "conflict"}
+                    for item in recovery
+                ):
+                    raise SystemdUserError(
+                        "Settings mutation is blocked by an active or conflicting systemd transaction"
+                    )
+
+            pretransaction = recover_systemd_handoffs
+        return execute_settings_transaction(
+            paths,
+            prepare,
+            verify=readiness_verifier,
+            pretransaction_side_effects=pretransaction,
+            precommit_side_effects=precommit_side_effects,
+            postcommit_side_effects=postcommit_side_effects,
+            apply_side_effects=lambda: _ensure_runtime_manifest_directories(paths),
+        )
+
+    if platform.system() == "Linux":
+        from .runtime_mutation import (
+            RuntimeMutationBusy,
+            RuntimeMutationUnsafe,
+            require_runtime_mutation_owner,
+            runtime_mutation_guard,
+        )
+
+        try:
+            # Peer Settings writers have no durable install/update owner and
+            # must serialize through this outer namespace guard before the
+            # Settings lock can merge their updates. Long-lived Runtime
+            # transactions are still rejected by the owner check below.
+            with runtime_mutation_guard(paths.home, blocking=True):
+                require_runtime_mutation_owner(
+                    paths.home,
+                    owner_id=runtime_mutation_owner_id,
+                )
+                summary = execute()
+        except (RuntimeMutationBusy, RuntimeMutationUnsafe) as exc:
+            raise RuntimeError(str(exc)) from exc
+    else:
+        summary = execute()
     saved = read_settings(paths)
     saved["settingsTransaction"] = summary
     return saved
@@ -1132,13 +1291,21 @@ def write_scheduler_handoff_settings(
     paths: RuntimePaths,
     *,
     precommit_side_effects: Callable[[dict], Callable[[], None] | None],
+    postcommit_side_effects: Callable[[dict], None] | None = None,
+    current_validator: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict:
     """Commit scheduler desired state around one explicit external handoff."""
     allowed = validate_operator_settings_update({"schedule": schedule_update})
+    def build_update(current: dict[str, Any]) -> dict[str, Any]:
+        if current_validator is not None:
+            current_validator(current)
+        return allowed
+
     return _write_operator_settings_transaction(
         paths,
-        lambda _current: allowed,
+        build_update,
         precommit_side_effects=precommit_side_effects,
+        postcommit_side_effects=postcommit_side_effects,
     )
 
 
@@ -1147,6 +1314,8 @@ def write_service_manager_settings(
     paths: RuntimePaths,
     *,
     precommit_side_effects: Callable[[dict], Callable[[], None] | None],
+    postcommit_side_effects: Callable[[dict], None] | None = None,
+    current_validator: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict:
     """Commit internal service-registration metadata around an external handoff."""
 
@@ -1154,10 +1323,81 @@ def write_service_manager_settings(
         raise ValueError("service registration update must be a non-empty object")
     if set(registration_update) - {"dashboard", "rag"}:
         raise ValueError("service registration update contains an unsupported group")
+    def build_update(current: dict[str, Any]) -> dict[str, Any]:
+        if current_validator is not None:
+            current_validator(current)
+        return registration_update
+
+    return _write_operator_settings_transaction(
+        paths,
+        build_update,
+        precommit_side_effects=precommit_side_effects,
+        postcommit_side_effects=postcommit_side_effects,
+    )
+
+
+def write_linux_installer_handoff_settings(
+    registration_update: dict[str, Any],
+    paths: RuntimePaths,
+    *,
+    precommit_side_effects: Callable[[dict], Callable[[], None] | None],
+    postcommit_side_effects: Callable[[dict], None] | None = None,
+    runtime_mutation_owner_id: str | None = None,
+) -> dict:
+    """Commit Linux installer registration metadata around its unit handoff."""
+
+    if not isinstance(registration_update, dict) or not registration_update:
+        raise ValueError("Linux installer registration update must be a non-empty object")
+    if set(registration_update) - {"dashboard", "rag", "schedule"}:
+        raise ValueError("Linux installer registration update contains an unsupported group")
     return _write_operator_settings_transaction(
         paths,
         lambda _current: registration_update,
         precommit_side_effects=precommit_side_effects,
+        postcommit_side_effects=postcommit_side_effects,
+        runtime_mutation_owner_id=runtime_mutation_owner_id,
+    )
+
+
+def write_linux_fresh_install_settings(
+    settings_update: dict[str, Any],
+    paths: RuntimePaths,
+    *,
+    precommit_side_effects: Callable[[dict], Callable[[], None] | None],
+    runtime_mutation_owner_id: str,
+) -> dict:
+    """Commit the complete fresh-install Settings bundle with an outer intent hook."""
+
+    if not isinstance(settings_update, dict):
+        raise ValueError("fresh-install settings update must be an object")
+    pipeline_update = (
+        settings_update.get("pipeline")
+        if isinstance(settings_update.get("pipeline"), dict)
+        else None
+    )
+    base_update = {
+        key: value
+        for key, value in settings_update.items()
+        if key not in {"rag", "pipeline"}
+    }
+    if pipeline_update is not None:
+        base_update["pipeline"] = {
+            key: value
+            for key, value in pipeline_update.items()
+            if key not in INSTALL_ONLY_PIPELINE_FIELDS
+        }
+    allowed = validate_operator_settings_update(base_update)
+    if pipeline_update is not None:
+        allowed["pipeline"] = copy.deepcopy(pipeline_update)
+    if "rag" in settings_update:
+        # languageProfile is immutable through normal operator writes but is
+        # selected exactly once at fresh-install bootstrap.
+        allowed["rag"] = normalize_rag_settings_update(settings_update["rag"])
+    return _write_operator_settings_transaction(
+        paths,
+        lambda _current: allowed,
+        precommit_side_effects=precommit_side_effects,
+        runtime_mutation_owner_id=runtime_mutation_owner_id,
     )
 
 
@@ -2732,7 +2972,15 @@ def llm_provider_readiness_error(
             paths,
             require_cross_process_secret,
         )
-    provider = resolve_llm_provider(paths, redact_secrets=False)
+    # Readiness is a verifier/status boundary, not a secret-migration
+    # boundary. In particular, this may run while a Settings transaction is
+    # still active; re-entering mutation recovery here could compensate the
+    # very transaction being verified.
+    provider = resolve_llm_provider(
+        paths,
+        redact_secrets=False,
+        _migrate_persisted_secrets=False,
+    )
     missing = [field for field in ("endpoint", "model", "apiKey") if not str(provider.get(field) or "").strip()]
     if not missing:
         secret_ref = provider.get("secretRef") if isinstance(provider.get("secretRef"), dict) else {}

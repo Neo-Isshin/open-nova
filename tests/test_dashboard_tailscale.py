@@ -141,6 +141,45 @@ class DashboardTailscaleTests(unittest.TestCase):
         self.assertNotIn("funnel", " ".join(argv).lower())
         self.assertNotIn("3037", " ".join(argv))
 
+    def test_serve_uses_configured_dashboard_port_for_status_and_mutation(self):
+        raw_status = {
+            "BackendState": "Running",
+            "TailscaleIPs": ["100.64.0.8", "fd7a:115c:a1e0::8"],
+            "Self": {"Online": True, "DNSName": "actanara.example.ts.net."},
+        }
+        raw_serve = {
+            "Web": {
+                "actanara.example.ts.net:443": {
+                    "Handlers": {"/": {"Proxy": "http://127.0.0.1:4545"}}
+                }
+            }
+        }
+        status_runner = QueueRunner(
+            [completed([], stdout=json.dumps(raw_status)), completed([], stdout=json.dumps(raw_serve))]
+        )
+        with patch.object(tailscale, "_configured_dashboard_port", return_value=4545):
+            status = tailscale.tailscale_status(
+                runner=status_runner,
+                which=lambda _name: "/usr/bin/tailscale",
+            )
+
+        self.assertTrue(status["serve"]["exclusiveManaged"])
+        self.assertEqual(status["serve"]["target"], "http://127.0.0.1:4545")
+
+        action_runner = QueueRunner([completed([])])
+        observed = self._connected_status(enabled=False)
+        with patch.object(tailscale, "_configured_dashboard_port", return_value=4545):
+            result = tailscale.set_dashboard_serve(
+                True,
+                {"confirmationText": tailscale.ENABLE_CONFIRMATION},
+                observed_status=observed,
+                runner=action_runner,
+                which=lambda _name: "/usr/bin/tailscale",
+            )
+
+        self.assertEqual(action_runner.calls[0][0][-1], "http://127.0.0.1:4545")
+        self.assertEqual(result["target"], "http://127.0.0.1:4545")
+
     def test_disable_only_removes_exclusive_actanara_mapping(self):
         runner = QueueRunner([completed([])])
         status = self._connected_status(enabled=True, exclusive=True)

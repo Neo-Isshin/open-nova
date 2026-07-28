@@ -16,6 +16,7 @@ import time
 import unittest
 from contextlib import closing
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -495,6 +496,22 @@ class UpdateTransactionTests(unittest.TestCase):
             "    temporary.write_text(json.dumps(state, sort_keys=True) + '\\n', encoding='utf-8')\n"
             "    os.replace(temporary, state_path)\n"
             "    raise SystemExit(0)\n"
+            "if command in {'enable', 'disable'}:\n"
+            "    names = [value for value in args[1:] if not value.startswith('-')]\n"
+            "    for selected in names:\n"
+            "        selected_unit = state.get('units', {}).get(selected, {'enabled': 'disabled', 'active': 'inactive'})\n"
+            "        if command == 'enable':\n"
+            "            selected_unit['enabled'] = 'enabled-runtime' if '--runtime' in args else 'enabled'\n"
+            "        elif '--runtime' in args:\n"
+            "            if selected_unit.get('enabled') == 'enabled-runtime':\n"
+            "                selected_unit['enabled'] = 'disabled'\n"
+            "        elif selected_unit.get('enabled') == 'enabled':\n"
+            "            selected_unit['enabled'] = 'disabled'\n"
+            "        state.setdefault('units', {})[selected] = selected_unit\n"
+            "    temporary = state_path.with_suffix('.tmp')\n"
+            "    temporary.write_text(json.dumps(state, sort_keys=True) + '\\n', encoding='utf-8')\n"
+            "    os.replace(temporary, state_path)\n"
+            "    raise SystemExit(0)\n"
             "raise SystemExit(0)\n",
             encoding="utf-8",
         )
@@ -580,6 +597,8 @@ class UpdateTransactionTests(unittest.TestCase):
         systemctl: str = "",
         systemd_units: tuple[str, ...] = (),
         expected_systemd_hashes: dict[str, str] | None = None,
+        xdg_config_home: Path | None = None,
+        tx_id: str = "fixture-tx",
         uid: int = 0,
     ) -> subprocess.CompletedProcess[str]:
         return self._run(
@@ -595,7 +614,7 @@ class UpdateTransactionTests(unittest.TestCase):
             "--mode",
             mode,
             "--tx-id",
-            "fixture-tx",
+            tx_id,
             "--owner-pid",
             str(os.getpid()),
             "--platform",
@@ -612,6 +631,15 @@ class UpdateTransactionTests(unittest.TestCase):
             "--uid",
             str(uid),
             check=False,
+            env=(
+                {
+                    "XDG_CONFIG_HOME": str(
+                        xdg_config_home or fixture["home"] / ".config"
+                    )
+                }
+                if platform == "Linux"
+                else None
+            ),
         )
 
     def _begin(
@@ -627,6 +655,7 @@ class UpdateTransactionTests(unittest.TestCase):
         materialize_candidates: bool = True,
         mode: str = "upgrade",
         settings_only_profile_evidence: bool = False,
+        xdg_config_home: Path | None = None,
     ) -> Path:
         settings_sha256 = hashlib.sha256(fixture["settings"].read_bytes()).hexdigest()
         active_venv_target = (fixture["runtime"] / ".venv").resolve()
@@ -676,6 +705,15 @@ class UpdateTransactionTests(unittest.TestCase):
             *(argument for name in systemd_units for argument in ("--systemd-unit", name)),
             "--uid",
             str(uid),
+            env=(
+                {
+                    "XDG_CONFIG_HOME": str(
+                        xdg_config_home or fixture["home"] / ".config"
+                    )
+                }
+                if platform == "Linux"
+                else None
+            ),
         )
         journal = Path(result.stdout.strip())
         if not materialize_candidates:
@@ -962,6 +1000,300 @@ class UpdateTransactionTests(unittest.TestCase):
             self.assertNotIn("stop actanara.daily-pipeline.timer", call_lines)
             self.assertNotIn("start actanara.daily-pipeline.timer", call_lines)
             self.assertEqual(json.loads(journal.read_text(encoding="utf-8"))["status"], "committed")
+
+    def test_linux_repair_persistently_isolates_enabled_units_and_rollback_restores_them(self):
+        for original_enable_state in ("enabled", "enabled-runtime"):
+            with self.subTest(enable_state=original_enable_state), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                fixture = self._fixture(root)
+                unit_root = fixture["home"] / ".config" / "systemd" / "user"
+                unit_root.mkdir(parents=True)
+                name = "actanara-dashboard.service"
+                (unit_root / name).write_text(
+                    "# Managed by Actanara. Do not edit by hand.\n[Unit]\n",
+                    encoding="utf-8",
+                )
+                state_path = root / "systemctl-state.json"
+                state_path.write_text(
+                    json.dumps(
+                        {
+                            "units": {
+                                name: {
+                                    "enabled": original_enable_state,
+                                    "active": "active",
+                                }
+                            }
+                        }
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+                calls = root / "systemctl-calls.log"
+                fake = root / "systemctl"
+                self._write_stateful_fake_systemctl(
+                    fake,
+                    state_path=state_path,
+                    calls_path=calls,
+                )
+                journal = self._begin(
+                    fixture,
+                    owner_pid=os.getpid(),
+                    systemctl=str(fake),
+                    systemd_units=(name,),
+                    mode="repair",
+                    settings_only_profile_evidence=True,
+                )
+
+                self._prepare_stopped_candidate(
+                    fixture,
+                    journal,
+                    allow_legacy_repair=True,
+                )
+                isolated = json.loads(state_path.read_text(encoding="utf-8"))
+                self.assertEqual(
+                    isolated["units"][name],
+                    {"enabled": "disabled", "active": "inactive"},
+                )
+                self._run("rollback", "--state", str(journal))
+
+                restored = json.loads(state_path.read_text(encoding="utf-8"))
+                self.assertEqual(restored["units"][name]["enabled"], original_enable_state)
+                self.assertEqual(restored["units"][name]["active"], "active")
+                call_lines = calls.read_text(encoding="utf-8").splitlines()
+                expected_disable = (
+                    f"disable --runtime {name}"
+                    if original_enable_state == "enabled-runtime"
+                    else f"disable {name}"
+                )
+                self.assertIn(expected_disable, call_lines)
+                self.assertLess(
+                    call_lines.index(expected_disable),
+                    call_lines.index(f"stop {name}"),
+                )
+                expected_enable = (
+                    f"enable --runtime {name}"
+                    if original_enable_state == "enabled-runtime"
+                    else f"enable {name}"
+                )
+                self.assertIn(expected_enable, call_lines)
+
+    def test_linux_committed_repair_restores_exact_retained_systemd_vector(self):
+        vectors = (
+            ("enabled", "active"),
+            ("enabled", "inactive"),
+            ("enabled-runtime", "active"),
+            ("enabled-runtime", "inactive"),
+            ("disabled", "active"),
+            ("disabled", "inactive"),
+        )
+        for enable_state, active_state in vectors:
+            with (
+                self.subTest(enable_state=enable_state, active_state=active_state),
+                tempfile.TemporaryDirectory() as tmp,
+            ):
+                root = Path(tmp)
+                fixture = self._fixture(root)
+                unit_root = fixture["home"] / ".config" / "systemd" / "user"
+                unit_root.mkdir(parents=True)
+                name = "actanara-dashboard.service"
+                (unit_root / name).write_text(
+                    "# Managed by Actanara. Do not edit by hand.\n[Unit]\n",
+                    encoding="utf-8",
+                )
+                state_path = root / "systemctl-state.json"
+                state_path.write_text(
+                    json.dumps(
+                        {
+                            "units": {
+                                name: {
+                                    "enabled": enable_state,
+                                    "active": active_state,
+                                }
+                            }
+                        }
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+                fake = root / "systemctl"
+                self._write_stateful_fake_systemctl(
+                    fake,
+                    state_path=state_path,
+                    calls_path=root / "systemctl-calls.log",
+                )
+                journal = self._begin(
+                    fixture,
+                    owner_pid=os.getpid(),
+                    systemctl=str(fake),
+                    systemd_units=(name,),
+                    mode="repair",
+                    settings_only_profile_evidence=True,
+                )
+                self._prepare_stopped_candidate(
+                    fixture,
+                    journal,
+                    allow_legacy_repair=True,
+                )
+                self._run("normalize-service-plists", "--state", str(journal))
+                self._run("promote", "--state", str(journal))
+                self._run("commit-repair", "--state", str(journal))
+
+                # Model an install handoff that temporarily left a persistent,
+                # active unit; the repair restore must still converge exactly.
+                current = json.loads(state_path.read_text(encoding="utf-8"))
+                current["units"][name] = {
+                    "enabled": "enabled",
+                    "active": "active",
+                }
+                state_path.write_text(
+                    json.dumps(current, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+
+                self._run(
+                    "restore-repair-services",
+                    "--state",
+                    str(journal),
+                    "--unit",
+                    name,
+                )
+                self._run(
+                    "restore-repair-services",
+                    "--state",
+                    str(journal),
+                    "--unit",
+                    name,
+                )
+
+                restored = json.loads(state_path.read_text(encoding="utf-8"))
+                self.assertEqual(
+                    restored["units"][name],
+                    {"enabled": enable_state, "active": active_state},
+                )
+                repair_state = json.loads(journal.read_text(encoding="utf-8"))
+                self.assertTrue(repair_state["repairSystemdRestoreComplete"])
+                self._run("complete-repair", "--state", str(journal))
+
+    def test_linux_committed_repair_systemd_restore_resumes_after_armed_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fixture = self._fixture(root)
+            unit_root = fixture["home"] / ".config" / "systemd" / "user"
+            unit_root.mkdir(parents=True)
+            name = "actanara-dashboard.service"
+            (unit_root / name).write_text(
+                "# Managed by Actanara. Do not edit by hand.\n[Unit]\n",
+                encoding="utf-8",
+            )
+            state_path = root / "systemctl-state.json"
+            state_path.write_text(
+                json.dumps(
+                    {"units": {name: {"enabled": "enabled-runtime", "active": "active"}}}
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            fake = root / "systemctl"
+            self._write_stateful_fake_systemctl(
+                fake,
+                state_path=state_path,
+                calls_path=root / "systemctl-calls.log",
+            )
+            journal = self._begin(
+                fixture,
+                owner_pid=os.getpid(),
+                systemctl=str(fake),
+                systemd_units=(name,),
+                mode="repair",
+                settings_only_profile_evidence=True,
+            )
+            self._prepare_stopped_candidate(
+                fixture,
+                journal,
+                allow_legacy_repair=True,
+            )
+            self._run("normalize-service-plists", "--state", str(journal))
+            self._run("promote", "--state", str(journal))
+            self._run("commit-repair", "--state", str(journal))
+
+            failed = self._run(
+                "restore-repair-services",
+                "--state",
+                str(journal),
+                "--unit",
+                name,
+                check=False,
+                env={
+                    "ACTANARA_INSTALL_TEST_MODE": "1",
+                    "ACTANARA_INSTALL_TEST_FAIL_PHASE": "repair-systemd-restore-armed",
+                },
+            )
+            self.assertEqual(failed.returncode, 70, failed.stdout + failed.stderr)
+            armed = json.loads(journal.read_text(encoding="utf-8"))
+            self.assertFalse(armed["repairSystemdRestoreComplete"])
+
+            self._run(
+                "restore-repair-services",
+                "--state",
+                str(journal),
+                "--unit",
+                name,
+            )
+            restored = json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                restored["units"][name],
+                {"enabled": "enabled-runtime", "active": "active"},
+            )
+
+    def test_linux_begin_honors_xdg_config_home_for_systemd_unit_inventory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fixture = self._fixture(root)
+            config_home = root / "operator-config"
+            unit_root = config_home / "systemd" / "user"
+            unit_root.mkdir(parents=True)
+            name = "actanara-dashboard.service"
+            (unit_root / name).write_text(
+                "# Managed by Actanara. Do not edit by hand.\n[Unit]\n",
+                encoding="utf-8",
+            )
+            state_path = root / "systemctl-state.json"
+            state_path.write_text(
+                json.dumps({"units": {name: {"enabled": "enabled", "active": "active"}}}) + "\n",
+                encoding="utf-8",
+            )
+            fake = root / "systemctl"
+            self._write_stateful_fake_systemctl(
+                fake,
+                state_path=state_path,
+                calls_path=root / "systemctl-calls.log",
+            )
+
+            result = self._begin_only_result(
+                fixture,
+                mode="upgrade",
+                systemctl=str(fake),
+                systemd_units=(name,),
+                xdg_config_home=config_home,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            journal = Path(result.stdout.strip())
+            state = json.loads(journal.read_text(encoding="utf-8"))
+            expected_root = unit_root.resolve(strict=False)
+            self.assertEqual(Path(state["systemdUnitRoot"]), expected_root)
+            self.assertEqual(Path(state["systemdUnits"][0]["unitPath"]), expected_root / name)
+            reserved = self._run(
+                "reserve-artifact",
+                "--state",
+                str(journal),
+                "--kind",
+                "source-temp",
+            )
+            self.assertEqual(
+                Path(reserved.stdout.strip()),
+                fixture["runtime"].resolve() / "app" / "releases" / ".tmp-fixture-tx",
+            )
 
     def test_linux_begin_rejects_definition_hash_race_before_service_stop(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -4313,6 +4645,10 @@ print -r -- "$reserved"
             repair_backups = Path(state["repairBackupPath"])
             self.assertTrue(repair_backups.is_dir())
             self.assertTrue(any(repair_backups.iterdir()))
+            self.assertTrue(
+                (fixture["runtime"] / "app" / ".update-transaction.lock").exists()
+            )
+            self._run("complete-repair", "--state", str(journal))
             self.assertFalse(
                 (fixture["runtime"] / "app" / ".update-transaction.lock").exists()
             )
@@ -4339,6 +4675,221 @@ print -r -- "$reserved"
             self.assertFalse(marker.is_symlink())
             completed = json.loads(journal.read_text(encoding="utf-8"))
             self.assertTrue(completed["repairConfigurationComplete"])
+
+    def test_linux_pending_repair_keeps_durable_owner_after_owner_exit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = self._fixture(Path(tmp))
+            journal = self._commit_repair_transaction(fixture)
+            lock = fixture["runtime"] / "app" / ".update-transaction.lock"
+            marker = fixture["runtime"] / "app" / ".repair-configuration-pending"
+            self.assertTrue(lock.exists())
+            self.assertTrue(marker.exists())
+
+            concurrent = self._begin_only_result(
+                fixture,
+                mode="repair",
+                tx_id="concurrent-repair",
+            )
+            self.assertEqual(concurrent.returncode, 70, concurrent.stdout + concurrent.stderr)
+            self.assertIn("committed Runtime repair is pending", concurrent.stderr)
+            self._mark_transaction_owner_dead(journal)
+            self._run("recover", "--runtime", str(fixture["runtime"]))
+            self.assertTrue(lock.exists())
+            self.assertTrue(marker.exists())
+
+            upgrade = self._begin_only_result(
+                fixture,
+                mode="upgrade",
+                tx_id="upgrade-while-repair-pending",
+            )
+            self.assertEqual(upgrade.returncode, 70, upgrade.stdout + upgrade.stderr)
+            self.assertIn("committed Runtime repair is pending", upgrade.stderr)
+            self.assertFalse(
+                (
+                    fixture["runtime"]
+                    / "app"
+                    / "update-transactions"
+                    / "upgrade-while-repair-pending"
+                ).exists()
+            )
+
+            retry = self._begin_only_result(
+                fixture,
+                mode="repair",
+                tx_id="retry-repair",
+            )
+            self.assertEqual(retry.returncode, 70, retry.stdout + retry.stderr)
+            self.assertIn("committed Runtime repair is pending", retry.stderr)
+
+            # Only the installer holding the inherited user mutation guard may
+            # resume and complete this committed journal.  A direct helper
+            # invocation after the original owner exited remains rejected.
+            complete = self._run(
+                "complete-repair",
+                "--state",
+                str(journal),
+                check=False,
+            )
+            self.assertEqual(complete.returncode, 70)
+            self.assertTrue(lock.exists())
+            self.assertTrue(marker.exists())
+
+    def test_marker_only_legacy_pending_repair_cannot_start_a_new_transaction(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = self._fixture(Path(tmp))
+            journal = self._commit_repair_transaction(fixture)
+            lock = fixture["runtime"] / "app" / ".update-transaction.lock"
+            marker = fixture["runtime"] / "app" / ".repair-configuration-pending"
+            lock.unlink()
+
+            retry = self._begin_only_result(
+                fixture,
+                mode="repair",
+                tx_id="replacement-repair",
+            )
+
+            self.assertEqual(retry.returncode, 70, retry.stdout + retry.stderr)
+            self.assertIn("resume its existing journal", retry.stderr)
+            self.assertTrue(marker.exists())
+            self.assertFalse(
+                (
+                    fixture["runtime"]
+                    / "app"
+                    / "update-transactions"
+                    / "replacement-repair"
+                ).exists()
+            )
+            self._run("complete-repair", "--state", str(journal))
+
+    def test_resumed_repair_completion_accepts_only_the_inherited_user_guard(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = self._fixture(Path(tmp))
+            journal = self._commit_repair_transaction(fixture)
+            self._mark_transaction_owner_dead(journal)
+            self._run("recover", "--runtime", str(fixture["runtime"]))
+
+            sys.path.insert(0, str(ROOT / "src"))
+            try:
+                from data_foundation.runtime_mutation import (
+                    current_runtime_mutation_guard_fd,
+                    runtime_mutation_guard,
+                )
+
+                with runtime_mutation_guard(fixture["runtime"]):
+                    guard_fd = current_runtime_mutation_guard_fd()
+                    self.assertIsNotNone(guard_fd)
+                    completed = subprocess.run(
+                        [
+                            sys.executable,
+                            str(HELPER),
+                            "complete-repair",
+                            "--state",
+                            str(journal),
+                        ],
+                        env={
+                            **os.environ,
+                            "ACTANARA_RUNTIME_MUTATION_GUARD_FD": str(guard_fd),
+                        },
+                        pass_fds=(guard_fd,),
+                        text=True,
+                        capture_output=True,
+                        check=False,
+                        timeout=30,
+                    )
+            finally:
+                sys.path.remove(str(ROOT / "src"))
+
+            self.assertEqual(
+                completed.returncode,
+                0,
+                completed.stdout + completed.stderr,
+            )
+            self.assertFalse(
+                (fixture["runtime"] / "app" / ".update-transaction.lock").exists()
+            )
+            self.assertFalse(
+                (fixture["runtime"] / "app" / ".repair-configuration-pending").exists()
+            )
+
+    def test_linux_complete_repair_rechecks_candidate_pointer_before_marker_clear(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = self._fixture(Path(tmp))
+            journal = self._commit_repair_transaction(fixture)
+            marker = fixture["runtime"] / "app" / ".repair-configuration-pending"
+            source = fixture["runtime"] / "app" / "source"
+            source.unlink()
+            source.symlink_to("releases/old")
+
+            result = self._run(
+                "complete-repair",
+                "--state",
+                str(journal),
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 70, result.stdout + result.stderr)
+            self.assertIn("source pointer", result.stderr)
+            self.assertTrue(marker.exists())
+            source.unlink()
+            source.symlink_to(fixture["candidate_source"])
+            self._run("complete-repair", "--state", str(journal))
+
+    def test_linux_repair_commit_and_completion_ack_windows_are_idempotent(self):
+        for phase in (
+            "repair-commit-journaled-before-lock-release",
+            "repair-configuration-complete-before-marker-clear",
+            "repair-marker-cleared-before-lock-release",
+        ):
+            with self.subTest(phase=phase), tempfile.TemporaryDirectory() as tmp:
+                fixture = self._fixture(Path(tmp))
+                journal = self._begin(
+                    fixture,
+                    owner_pid=os.getpid(),
+                    mode="repair",
+                    settings_only_profile_evidence=True,
+                )
+                self._prepare_stopped_candidate(
+                    fixture,
+                    journal,
+                    allow_legacy_repair=True,
+                )
+                self._run("normalize-service-plists", "--state", str(journal))
+                self._run("promote", "--state", str(journal))
+                if phase.startswith("repair-commit"):
+                    failed = self._run(
+                        "commit-repair",
+                        "--state",
+                        str(journal),
+                        check=False,
+                        env={
+                            "ACTANARA_INSTALL_TEST_MODE": "1",
+                            "ACTANARA_INSTALL_TEST_FAIL_PHASE": phase,
+                        },
+                    )
+                    self.assertEqual(failed.returncode, 70, failed.stdout + failed.stderr)
+                else:
+                    self._run("commit-repair", "--state", str(journal))
+                    failed = self._run(
+                        "complete-repair",
+                        "--state",
+                        str(journal),
+                        check=False,
+                        env={
+                            "ACTANARA_INSTALL_TEST_MODE": "1",
+                            "ACTANARA_INSTALL_TEST_FAIL_PHASE": phase,
+                        },
+                    )
+                    self.assertEqual(failed.returncode, 70, failed.stdout + failed.stderr)
+
+                state = json.loads(journal.read_text(encoding="utf-8"))
+                self.assertEqual(state["status"], "committed")
+                self._run("complete-repair", "--state", str(journal))
+                self.assertFalse(
+                    (fixture["runtime"] / "app" / ".repair-configuration-pending").exists()
+                )
+                self.assertFalse(
+                    (fixture["runtime"] / "app" / ".update-transaction.lock").exists()
+                )
 
     def test_complete_repair_preserves_pending_marker_for_wrong_journal_or_marker(self):
         for attack in ("wrong-journal", "wrong-marker"):

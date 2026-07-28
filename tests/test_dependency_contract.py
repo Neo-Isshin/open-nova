@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import shutil
 import stat
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -1499,6 +1500,51 @@ class DependencyWheelhouseTests(unittest.TestCase):
             self.assertNotIn("PIP_INDEX_URL", isolated)
             self.assertNotIn("PIP_EXTRA_INDEX_URL", isolated)
             self.assertNotIn("PYTHONPATH", isolated)
+
+    def test_failed_pip_reports_bounded_redacted_summary_and_private_full_log(self):
+        with tempfile.TemporaryDirectory(dir=SECURE_TEMP_PARENT) as temporary:
+            root = Path(temporary)
+            log = root / "runtime" / "state" / "logs" / "dependencies.log"
+            credential_fixture = "synthetic-pip-credential-value"
+            completed = subprocess.CompletedProcess(
+                ["python", "-m", "pip"],
+                1,
+                ("collecting fixture\n" + "detail " * 5000).encode(),
+                (
+                    "ERROR: https://user:"
+                    + credential_fixture
+                    + "@packages.example.invalid/simple?token="
+                    + credential_fixture
+                    + "\nNo matching distribution found for fixture==9.9\n"
+                ).encode(),
+            )
+            with (
+                patch.object(contract.subprocess, "run", return_value=completed),
+                patch.dict(
+                    os.environ,
+                    {"ACTANARA_TEST_SYNTHETIC_TOKEN": credential_fixture},
+                    clear=False,
+                ),
+                self.assertRaises(contract.ContractError) as raised,
+            ):
+                contract._run_pip(
+                    ["python", "-m", "pip", "install", "fixture==9.9"],
+                    timeout=5,
+                    code="locked-install-failed",
+                    diagnostic_log=log,
+                )
+
+            summary = raised.exception.message
+            self.assertLessEqual(len(summary), contract.MAX_PIP_ERROR_SUMMARY_CHARS)
+            self.assertIn("No matching distribution", summary)
+            self.assertNotIn(credential_fixture, summary)
+            self.assertTrue(log.is_file())
+            self.assertEqual(stat.S_IMODE(log.stat().st_mode), 0o600)
+            diagnostic = log.read_text(encoding="utf-8")
+            self.assertIn("collecting fixture", diagnostic)
+            self.assertIn("No matching distribution", diagnostic)
+            self.assertNotIn(credential_fixture, diagnostic)
+            self.assertIn("[redacted]", diagnostic)
 
 
 if __name__ == "__main__":

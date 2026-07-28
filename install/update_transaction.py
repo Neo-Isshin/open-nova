@@ -466,8 +466,22 @@ def _read_repair_configuration_pending(path: Path) -> tuple[bytes, os.stat_resul
         os.close(descriptor)
 
 
-def _systemd_unit_root(home: Path) -> Path:
-    return home / ".config" / "systemd" / "user"
+def _systemd_config_home(home: Path) -> Path:
+    configured = os.environ.get("XDG_CONFIG_HOME")
+    root = Path(configured) if configured else home / ".config"
+    if (
+        not root.is_absolute()
+        or os.path.normpath(str(root)) != str(root)
+        or any(character in str(root) for character in "\0\r\n\t")
+    ):
+        raise TransactionError("XDG_CONFIG_HOME is unsafe for systemd user units")
+    if root.is_symlink():
+        raise TransactionError("XDG_CONFIG_HOME is unsafe for systemd user units")
+    return root.resolve(strict=False)
+
+
+def _systemd_unit_root(home: Path, config_home: Path | None = None) -> Path:
+    return (config_home or _systemd_config_home(home)) / "systemd" / "user"
 
 
 def _validate_systemd_journal_bindings(state: dict[str, Any]) -> None:
@@ -479,14 +493,25 @@ def _validate_systemd_journal_bindings(state: dict[str, Any]) -> None:
             raise TransactionError("non-Linux update journal contains systemd units")
         return
     home = Path(str(state.get("home") or ""))
+    configured_root = state.get("systemdConfigHome")
+    config_home = (
+        Path(str(configured_root))
+        if configured_root is not None
+        else home / ".config"
+    )
     root = Path(str(state.get("systemdUnitRoot") or ""))
-    if not home.is_absolute() or root != _systemd_unit_root(home):
-        raise TransactionError("systemd user-unit root escaped the selected HOME")
+    if (
+        not home.is_absolute()
+        or not config_home.is_absolute()
+        or os.path.normpath(str(config_home)) != str(config_home)
+        or root != _systemd_unit_root(home, config_home)
+        or not _is_within(root, config_home)
+    ):
+        raise TransactionError("systemd user-unit root escaped the selected XDG config root")
     if root.exists() and (
         root.is_symlink()
         or not root.is_dir()
         or root.resolve(strict=False) != root
-        or not _is_within(root, home)
     ):
         raise TransactionError("systemd user-unit root is unsafe")
     if not units and not state.get("systemctl") and state.get("systemctlIdentity") is None:
@@ -531,6 +556,14 @@ def _validate_systemd_journal_bindings(state: dict[str, Any]) -> None:
             or str(unit.get("activeState") or "") not in SYSTEMD_ACTIVE_STATES
             or not isinstance(unit.get("active"), bool)
             or unit.get("active") != (unit.get("activeState") == "active")
+            or (
+                "disabledByTransaction" in unit
+                and not isinstance(unit.get("disabledByTransaction"), bool)
+            )
+            or (
+                "enableRestoreMode" in unit
+                and unit.get("enableRestoreMode") not in {"persistent", "runtime"}
+            )
         ):
             raise TransactionError("systemd unit inventory binding is invalid")
         matches = [
@@ -2848,6 +2881,32 @@ def _run_systemctl(
     allowed: set[int] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     _validate_systemd_journal_bindings(state)
+    child_options: dict[str, Any] = {}
+    if sys.platform == "linux":
+        raw_guard_fd = os.environ.get("ACTANARA_RUNTIME_MUTATION_GUARD_FD", "")
+        if raw_guard_fd:
+            try:
+                guard_fd = int(raw_guard_fd)
+                guard_metadata = os.fstat(guard_fd)
+            except (ValueError, OSError) as exc:
+                raise TransactionError(
+                    "inherited Runtime mutation guard is unavailable"
+                ) from exc
+            if guard_fd < 3 or not stat.S_ISREG(guard_metadata.st_mode):
+                raise TransactionError("inherited Runtime mutation guard is unsafe")
+            child_options["pass_fds"] = (guard_fd,)
+        parent_pid = os.getpid()
+
+        def configure_parent_death_signal() -> None:  # pragma: no cover - Debian only
+            import ctypes
+
+            libc = ctypes.CDLL(None, use_errno=True)
+            if libc.prctl(1, signal.SIGKILL, 0, 0, 0) != 0:
+                os._exit(126)
+            if os.getppid() != parent_pid:
+                os._exit(126)
+
+        child_options["preexec_fn"] = configure_parent_death_signal
     try:
         result = subprocess.run(
             [state["systemctl"], "--user", *args],
@@ -2856,6 +2915,7 @@ def _run_systemctl(
             text=True,
             timeout=20,
             check=False,
+            **child_options,
         )
     except (OSError, subprocess.SubprocessError) as exc:
         operation = args[0] if args else "operation"
@@ -4057,12 +4117,65 @@ def _release_transaction_command_lock(descriptor: int | None) -> None:
         os.close(descriptor)
 
 
-def _require_owner_caller(state: dict[str, Any]) -> None:
+def _has_inherited_runtime_mutation_guard(state: dict[str, Any]) -> bool:
+    """Authenticate a resumed Linux repair through the inherited user guard."""
+
+    if state.get("platform") != "Linux":
+        return False
+    raw = os.environ.get("ACTANARA_RUNTIME_MUTATION_GUARD_FD", "")
+    try:
+        descriptor = int(raw)
+        metadata = os.fstat(descriptor)
+    except (TypeError, ValueError, OSError):
+        return False
+    expected = (
+        Path(tempfile.gettempdir())
+        / f"actanara-runtime-mutation-{os.getuid()}"
+        / ".runtime-mutation.guard"
+    )
+    try:
+        expected_metadata = expected.stat(follow_symlinks=False)
+    except OSError:
+        return False
+    if (
+        descriptor < 3
+        or not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != os.getuid()
+        or metadata.st_nlink != 1
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+        or (metadata.st_dev, metadata.st_ino)
+        != (expected_metadata.st_dev, expected_metadata.st_ino)
+    ):
+        return False
+    try:
+        # A duplicate inherited file description can reacquire its own flock;
+        # an unrelated descriptor opened after the parent locked it cannot.
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return False
+    return True
+
+
+def _require_owner_caller(
+    state: dict[str, Any],
+    *,
+    command: str | None = None,
+) -> None:
     owner_pid = int(state.get("ownerPid") or 0)
-    if not _is_descendant_of_owner(owner_pid, state.get("ownerProcessIdentity")):
-        raise TransactionError(
-            "update transaction helper command is not descended from the active installer process"
-        )
+    if _is_descendant_of_owner(owner_pid, state.get("ownerProcessIdentity")):
+        return
+    repair_resume = (
+        command in {"complete-repair", "restore-repair-services"}
+        and state.get("mode") == "repair"
+        and state.get("status") == "committed"
+        and state.get("repairConfigurationComplete") is not True
+        and _has_inherited_runtime_mutation_guard(state)
+    )
+    if repair_resume:
+        return
+    raise TransactionError(
+        "update transaction helper command is not descended from the active installer process"
+    )
 
 
 def _set_active_command(state_path: Path, command: str | None) -> None:
@@ -4182,6 +4295,15 @@ def begin(args: argparse.Namespace) -> int:
     for managed in managed_directories:
         _require_managed_directory(managed, runtime)
         managed.mkdir(parents=True, exist_ok=True, mode=0o700)
+    repair_pending = runtime / "app" / REPAIR_CONFIGURATION_PENDING_NAME
+    try:
+        _read_repair_configuration_pending(repair_pending)
+    except FileNotFoundError:
+        pass
+    else:
+        raise TransactionError(
+            "a committed Runtime repair is pending; resume its existing journal"
+        )
     tx_root = runtime / "app" / "update-transactions"
     os.chmod(tx_root, 0o700)
     lock = runtime / "app" / ".update-transaction.lock"
@@ -4200,6 +4322,11 @@ def begin(args: argparse.Namespace) -> int:
         command_lock_identity = _create_transaction_command_lock(tx_dir)
         if args.platform not in {"Darwin", "Linux"}:
             raise TransactionError("update transaction platform is unsupported")
+        systemd_config_home = (
+            _systemd_config_home(home)
+            if args.platform == "Linux"
+            else home / ".config"
+        )
         launchctl = args.launchctl
         systemctl = ""
         systemctl_identity: dict[str, Any] | None = None
@@ -4248,7 +4375,8 @@ def begin(args: argparse.Namespace) -> int:
             "domain": domain,
             "systemctl": systemctl,
             "systemctlIdentity": systemctl_identity,
-            "systemdUnitRoot": str(_systemd_unit_root(home)),
+            "systemdConfigHome": str(systemd_config_home),
+            "systemdUnitRoot": str(_systemd_unit_root(home, systemd_config_home)),
             "systemdUnits": [],
             "lockPath": str(lock),
             "commandLockIdentity": command_lock_identity,
@@ -4485,14 +4613,14 @@ def begin(args: argparse.Namespace) -> int:
                     }
                 )
         elif args.systemd_unit:
-            unit_root = _systemd_unit_root(home)
+            unit_root = Path(state["systemdUnitRoot"])
             if (
                 unit_root.exists()
                 and (
                     unit_root.is_symlink()
                     or not unit_root.is_dir()
                     or unit_root.resolve(strict=False) != unit_root
-                    or not _is_within(unit_root, home)
+                    or not _is_within(unit_root, systemd_config_home)
                 )
             ):
                 raise TransactionError("systemd user-unit root is unsafe")
@@ -5061,6 +5189,39 @@ def stop_services(args: argparse.Namespace) -> int:
         _save_state(state_path, state, event="services-stopping")
         _maybe_test_fail("service-stop-initiated")
         ordered = sorted(units, key=lambda item: (not item["name"].endswith(".timer"), item["name"]))
+        if state.get("mode") == "repair":
+            # Isolate every persistently or runtime-enabled unit before the
+            # first stop.  Otherwise a crash between stop and disable can let
+            # the user manager immediately respawn an old release.
+            for unit in ordered:
+                if unit.get("enableState") not in {"enabled", "enabled-runtime"}:
+                    continue
+                enable_state, _active_state = _systemd_probe_state(state, unit["name"])
+                if enable_state != unit["enableState"]:
+                    raise TransactionError(
+                        f"managed systemd unit enable state changed during repair isolation: {unit['name']}"
+                    )
+                unit["disabledByTransaction"] = True
+                unit["enableRestoreMode"] = (
+                    "runtime"
+                    if unit["enableState"] == "enabled-runtime"
+                    else "persistent"
+                )
+                _save_state(
+                    state_path,
+                    state,
+                    event=f"systemd-unit-disable-for-repair-armed:{unit['name']}",
+                )
+                if unit.get("enableRestoreMode") == "runtime":
+                    _run_systemctl(state, "disable", "--runtime", unit["name"])
+                else:
+                    _run_systemctl(state, "disable", unit["name"])
+                _save_state(
+                    state_path,
+                    state,
+                    event=f"systemd-unit-disabled-for-repair:{unit['name']}",
+                )
+            _maybe_test_fail("systemd-units-disabled-for-repair")
         for unit in ordered:
             if not unit["active"]:
                 continue
@@ -5073,7 +5234,12 @@ def stop_services(args: argparse.Namespace) -> int:
                 unit["name"],
                 expected_active=False,
             )
-            if enable_state != unit["enableState"]:
+            expected_enable_state = (
+                "disabled"
+                if unit.get("disabledByTransaction") is True
+                else unit["enableState"]
+            )
+            if enable_state != expected_enable_state:
                 raise TransactionError(
                     f"managed systemd unit enable state changed during stop: {unit['name']}"
                 )
@@ -5163,7 +5329,12 @@ def restore_services(args: argparse.Namespace) -> int:
         ordered = sorted(units, key=lambda item: (item["name"].endswith(".timer"), item["name"]))
         for unit in ordered:
             enable_state, active_state = _systemd_probe_state(state, unit["name"])
-            if enable_state != unit["enableState"]:
+            allowed_enable_states = (
+                {"disabled", unit["enableState"]}
+                if unit.get("disabledByTransaction") is True
+                else {unit["enableState"]}
+            )
+            if enable_state not in allowed_enable_states:
                 raise TransactionError(
                     f"managed systemd unit enable state changed before restore: {unit['name']}"
                 )
@@ -5173,8 +5344,21 @@ def restore_services(args: argparse.Namespace) -> int:
                         f"managed systemd unit changed concurrently from inactive to active: {unit['name']}"
                     )
                 continue
+            if unit.get("disabledByTransaction") is True and enable_state == "disabled":
+                if unit.get("enableRestoreMode") == "runtime":
+                    _run_systemctl(state, "enable", "--runtime", unit["name"])
+                else:
+                    _run_systemctl(state, "enable", unit["name"])
             if active_state != "active":
                 _run_systemctl(state, "start", unit["name"])
+        for unit in ordered:
+            if unit.get("disabledByTransaction") is True and not unit["active"]:
+                enable_state, _active_state = _systemd_probe_state(state, unit["name"])
+                if enable_state == "disabled":
+                    if unit.get("enableRestoreMode") == "runtime":
+                        _run_systemctl(state, "enable", "--runtime", unit["name"])
+                    else:
+                        _run_systemctl(state, "enable", unit["name"])
         for unit in ordered:
             enable_state, active_state = _wait_for_systemd_active_state(
                 state,
@@ -5568,7 +5752,12 @@ def rollback_state(state_path: Path, state: dict[str, Any]) -> None:
         for unit in ordered:
             try:
                 enable_state, active_state = _systemd_probe_state(state, unit["name"])
-                if enable_state != unit["enableState"]:
+                allowed_enable_states = (
+                    {"disabled", unit["enableState"]}
+                    if unit.get("disabledByTransaction") is True
+                    else {unit["enableState"]}
+                )
+                if enable_state not in allowed_enable_states:
                     errors.append(f"systemd-enable-concurrent-change:{unit['name']}")
                     continue
                 if not unit["active"]:
@@ -5688,6 +5877,19 @@ def commit(args: argparse.Namespace) -> int:
     return 0
 
 
+def _verify_repair_candidate_pointers(state: dict[str, Any]) -> None:
+    for name in ("source", "venv"):
+        pointer = Path(str(state[name]["path"]))
+        candidate = Path(str(state[name]["candidateTarget"]))
+        if (
+            not pointer.is_symlink()
+            or pointer.resolve(strict=False) != candidate.resolve(strict=False)
+        ):
+            raise TransactionError(
+                f"repair {name} pointer no longer matches its staged candidate"
+            )
+
+
 def commit_repair(args: argparse.Namespace) -> int:
     """Commit rebuilt Runtime pointers while legacy services remain stopped.
 
@@ -5715,20 +5917,7 @@ def commit_repair(args: argparse.Namespace) -> int:
     _verify_live_migration_ledger(state)
     _verify_service_plist_bindings(state)
 
-    source = Path(state["source"]["path"])
-    candidate_source = Path(state["source"]["candidateTarget"])
-    venv = Path(state["venv"]["path"])
-    candidate_venv = Path(state["venv"]["candidateTarget"])
-    if (
-        not source.is_symlink()
-        or source.resolve(strict=False) != candidate_source.resolve(strict=False)
-    ):
-        raise TransactionError("repair source pointer does not match its staged candidate")
-    if (
-        not venv.is_symlink()
-        or venv.resolve(strict=False) != candidate_venv.resolve(strict=False)
-    ):
-        raise TransactionError("repair venv pointer does not match its staged candidate")
+    _verify_repair_candidate_pointers(state)
 
     if state["platform"] == "Darwin":
         for service in state.get("services") or []:
@@ -5740,7 +5929,12 @@ def commit_repair(args: argparse.Namespace) -> int:
     elif state["platform"] == "Linux":
         for unit in state.get("systemdUnits") or []:
             enable_state, active_state = _systemd_probe_state(state, unit["name"])
-            if enable_state != unit["enableState"]:
+            expected_enable_state = (
+                "disabled"
+                if unit.get("disabledByTransaction") is True
+                else unit["enableState"]
+            )
+            if enable_state != expected_enable_state:
                 raise TransactionError(
                     f"managed systemd unit enable state changed before repair commit: {unit['name']}"
                 )
@@ -5783,17 +5977,12 @@ def commit_repair(args: argparse.Namespace) -> int:
     state["status"] = "committed"
     _save_state(state_path, state, event="repair-committed-services-stopped")
     _maybe_test_fail("repair-commit-journaled-before-lock-release")
-    _release_lock(state)
     return 0
 
 
-def complete_repair(args: argparse.Namespace) -> int:
-    """Clear the durable retry marker after repair configuration succeeds."""
-
-    state_path = Path(args.state)
-    state = _load_state(state_path)
-    if state.get("mode") != "repair" or state.get("status") != "committed":
-        raise TransactionError("repair completion requires a committed repair transaction")
+def _verify_live_repair_configuration_marker(
+    state: dict[str, Any],
+) -> tuple[Path, bytes, os.stat_result]:
     pending = state.get("repairConfigurationPending")
     expected_fields = {"path", "txId", "sha256", "device", "inode"}
     if (
@@ -5805,19 +5994,157 @@ def complete_repair(args: argparse.Namespace) -> int:
     ):
         raise TransactionError("repair configuration marker binding is incomplete")
     marker = _repair_configuration_pending_path(state)
-    payload, metadata = _read_repair_configuration_pending(marker)
     expected_payload = _repair_configuration_pending_payload(str(state["txId"]))
+    payload, metadata = _read_repair_configuration_pending(marker)
     if (
         payload != expected_payload
         or hashlib.sha256(payload).hexdigest() != pending.get("sha256")
         or metadata.st_dev != pending.get("device")
         or metadata.st_ino != pending.get("inode")
     ):
+        raise TransactionError(
+            "repair configuration marker does not belong to this transaction"
+        )
+    return marker, payload, metadata
+
+
+def restore_repair_services(args: argparse.Namespace) -> int:
+    """Converge retained Linux units to their exact pre-repair state vector."""
+
+    state_path = Path(args.state)
+    state = _load_state(state_path)
+    if (
+        state.get("mode") != "repair"
+        or state.get("platform") != "Linux"
+        or state.get("status") != "committed"
+        or state.get("repairConfigurationComplete") is True
+    ):
+        raise TransactionError(
+            "repair systemd restore requires a pending committed Linux repair"
+        )
+    _verify_repair_candidate_pointers(state)
+    _verify_live_repair_configuration_marker(state)
+    requested = list(args.unit)
+    if len(requested) != len(set(requested)) or any(
+        not SYSTEMD_UNIT_NAME_RE.fullmatch(name) for name in requested
+    ):
+        raise TransactionError("repair systemd restore unit inventory is invalid")
+    by_name = {
+        str(unit.get("name") or ""): unit
+        for unit in state.get("systemdUnits") or []
+        if isinstance(unit, dict)
+    }
+    if any(name not in by_name for name in requested):
+        raise TransactionError(
+            "repair systemd restore requested a unit outside the prior inventory"
+        )
+    selected = [by_name[name] for name in requested]
+    for unit in selected:
+        if (
+            unit.get("enableState") not in {"enabled", "enabled-runtime", "disabled"}
+            or unit.get("activeState") not in {"active", "inactive"}
+        ):
+            raise TransactionError(
+                f"repair cannot exactly restore the prior systemd state: {unit['name']}"
+            )
+    planned = [
+        {
+            "name": unit["name"],
+            "enableState": unit["enableState"],
+            "activeState": unit["activeState"],
+        }
+        for unit in selected
+    ]
+    existing_plan = state.get("repairSystemdRestorePlan")
+    if existing_plan is not None and existing_plan != planned:
+        raise TransactionError("repair systemd restore plan changed while resuming")
+    if existing_plan is None:
+        state["repairSystemdRestorePlan"] = planned
+        state["repairSystemdRestoreComplete"] = False
+        _save_state(state_path, state, event="repair-systemd-restore-armed")
+    _maybe_test_fail("repair-systemd-restore-armed")
+
+    ordered = sorted(
+        selected,
+        key=lambda item: (str(item["name"]).endswith(".timer"), str(item["name"])),
+    )
+    for unit in ordered:
+        name = str(unit["name"])
+        desired_enable = str(unit["enableState"])
+        # Clear both persistent and runtime links before rebuilding the exact
+        # requested enable mode.  The operations are intentionally convergent
+        # so a SIGKILL at any command boundary can be resumed safely.
+        _run_systemctl(state, "disable", name)
+        _run_systemctl(state, "disable", "--runtime", name)
+        if desired_enable == "enabled":
+            _run_systemctl(state, "enable", name)
+        elif desired_enable == "enabled-runtime":
+            _run_systemctl(state, "enable", "--runtime", name)
+        if unit["activeState"] == "active":
+            _run_systemctl(state, "start", name)
+        else:
+            _run_systemctl(state, "stop", name)
+        _maybe_test_fail(f"repair-systemd-unit-restored:{name}")
+
+    for unit in ordered:
+        enable_state, active_state = _wait_for_systemd_active_state(
+            state,
+            str(unit["name"]),
+            expected_active=unit["activeState"] == "active",
+        )
+        if (
+            enable_state != unit["enableState"]
+            or active_state != unit["activeState"]
+        ):
+            raise TransactionError(
+                f"repair did not restore the exact systemd state: {unit['name']}"
+            )
+    state = _load_state(state_path)
+    if state.get("repairSystemdRestorePlan") != planned:
+        raise TransactionError("repair systemd restore plan changed before commit")
+    state["repairSystemdRestoreComplete"] = True
+    _save_state(state_path, state, event="repair-systemd-restore-complete")
+    return 0
+
+
+def complete_repair(args: argparse.Namespace) -> int:
+    """Clear the durable retry marker after repair configuration succeeds."""
+
+    state_path = Path(args.state)
+    state = _load_state(state_path)
+    if state.get("mode") != "repair" or state.get("status") != "committed":
+        raise TransactionError("repair completion requires a committed repair transaction")
+    pending = state.get("repairConfigurationPending")
+    if (
+        not isinstance(pending, dict)
+        or set(pending) != {"path", "txId", "sha256", "device", "inode"}
+        or pending.get("txId") != state.get("txId")
+        or not isinstance(pending.get("device"), int)
+        or not isinstance(pending.get("inode"), int)
+    ):
+        raise TransactionError("repair configuration marker binding is incomplete")
+    marker = _repair_configuration_pending_path(state)
+    expected_payload = _repair_configuration_pending_payload(str(state["txId"]))
+    try:
+        payload, metadata = _read_repair_configuration_pending(marker)
+    except FileNotFoundError:
+        if state.get("repairConfigurationComplete") is not True:
+            raise TransactionError("repair configuration marker disappeared before completion")
+        _verify_recorded_candidate_artifacts(state)
+        _verify_repair_candidate_pointers(state)
+        _release_lock(state)
+        return 0
+    if payload == expected_payload:
+        _verify_live_repair_configuration_marker(state)
+    else:
         raise TransactionError("repair configuration marker does not belong to this transaction")
 
-    state["repairConfigurationComplete"] = True
-    _save_state(state_path, state, event="repair-configuration-complete")
-    _maybe_test_fail("repair-configuration-complete-before-marker-clear")
+    _verify_recorded_candidate_artifacts(state)
+    _verify_repair_candidate_pointers(state)
+    if state.get("repairConfigurationComplete") is not True:
+        state["repairConfigurationComplete"] = True
+        _save_state(state_path, state, event="repair-configuration-complete")
+        _maybe_test_fail("repair-configuration-complete-before-marker-clear")
     payload, metadata = _read_repair_configuration_pending(marker)
     if (
         payload != expected_payload
@@ -5825,8 +6152,11 @@ def complete_repair(args: argparse.Namespace) -> int:
         or metadata.st_ino != pending.get("inode")
     ):
         raise TransactionError("repair configuration marker changed before completion")
+    _verify_repair_candidate_pointers(state)
     marker.unlink()
     _fsync_dir(marker.parent)
+    _maybe_test_fail("repair-marker-cleared-before-lock-release")
+    _release_lock(state)
     return 0
 
 
@@ -5862,7 +6192,19 @@ def recover(args: argparse.Namespace) -> int:
         state = _load_state(state_path)
         if Path(state["runtime"]).resolve(strict=False) != runtime.resolve(strict=False):
             raise TransactionError("stale update lock journal belongs to a different Runtime")
-        if state.get("status") in TERMINAL_STATUSES:
+        repair_configuration_live = (
+            state.get("mode") == "repair"
+            and state.get("status") == "committed"
+            and state.get("repairConfigurationComplete") is not True
+        )
+        if (
+            state.get("mode") == "repair"
+            and state.get("status") == "committed"
+            and state.get("repairConfigurationComplete") is True
+        ):
+            complete_repair(argparse.Namespace(state=str(state_path)))
+            return 0
+        if state.get("status") in TERMINAL_STATUSES and not repair_configuration_live:
             _release_lock(state)
             return 0
         if state.get("legacySchemaVersion"):
@@ -5883,6 +6225,15 @@ def recover(args: argparse.Namespace) -> int:
             if _same_process(active_command_pid, active_command_identity):
                 raise TransactionError("an update transaction helper command is still active")
             state = _load_state(state_path)
+        if state.get("status") in TERMINAL_STATUSES:
+            # A committed repair is not operationally terminal until its
+            # configuration marker is cleared.  Keep the durable owner link
+            # in place so Settings and service mutations remain fail-closed
+            # while the installer resumes the committed candidate.
+            if repair_configuration_live:
+                return 0
+            _release_lock(state)
+            return 0
         rollback_state(state_path, state)
         return 0
     finally:
@@ -5980,6 +6331,11 @@ def build_parser() -> argparse.ArgumentParser:
         command.add_argument("--state", required=True)
         command.set_defaults(func=func)
 
+    restore_repair = sub.add_parser("restore-repair-services")
+    restore_repair.add_argument("--state", required=True)
+    restore_repair.add_argument("--unit", action="append", default=[])
+    restore_repair.set_defaults(func=restore_repair_services)
+
     recover_parser = sub.add_parser("recover")
     recover_parser.add_argument("--runtime", required=True)
     recover_parser.set_defaults(func=recover)
@@ -6006,7 +6362,10 @@ def main(argv: Iterable[str] | None = None) -> int:
     try:
         if state_path is not None:
             command_lock = _acquire_transaction_command_lock(state_path)
-            _require_owner_caller(_load_state(state_path))
+            _require_owner_caller(
+                _load_state(state_path),
+                command=str(args.command),
+            )
             active_command = (
                 f"run-candidate-command:{args.phase}"
                 if args.func is run_candidate_command
