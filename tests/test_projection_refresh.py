@@ -1573,17 +1573,37 @@ No activity today.
                 success = False
                 failed_step = "Narrative Pass"
 
-            result = run_history_backfill(
-                paths,
-                run_id,
-                start_date=date(2026, 4, 1),
-                end_date=date(2026, 4, 1),
-                grain="selected",
-                periods=periods,
-                daily_pipeline_runner=lambda selected_day, runtime_paths: FailedPipeline(),
-                ai_assets_builder=lambda: {"tools": [{"name": "Codex", "tokens": 128}], "totalTokens": 128},
-                period_builder=lambda selected_start, days: {"models": [], "workspaceUsage": [], "assetHourlyHeatmap": {}},
-            )
+            with patch(
+                "data_foundation.snapshots.detect_external_tools",
+                return_value={
+                    "detectedToolKeys": ["codex"],
+                    "toolPresence": {
+                        "codex": {
+                            "id": "codex",
+                            "detected": True,
+                            "status": "detected",
+                        }
+                    },
+                },
+            ):
+                result = run_history_backfill(
+                    paths,
+                    run_id,
+                    start_date=date(2026, 4, 1),
+                    end_date=date(2026, 4, 1),
+                    grain="selected",
+                    periods=periods,
+                    daily_pipeline_runner=lambda selected_day, runtime_paths: FailedPipeline(),
+                    ai_assets_builder=lambda: {
+                        "tools": [{"name": "Codex", "allTimeTokens": 128}],
+                        "totalTokens": 128,
+                    },
+                    period_builder=lambda selected_start, days: {
+                        "models": [],
+                        "workspaceUsage": [],
+                        "assetHourlyHeatmap": {},
+                    },
+                )
 
             status = projection_refresh_status(paths, run_id)
             snapshot = read_dashboard_snapshot(paths)
@@ -1592,6 +1612,11 @@ No activity today.
             self.assertEqual(status["status"], "partial")
             self.assertEqual(status["metadata"]["aiAssetsSnapshot"]["status"], "ready")
             self.assertEqual(snapshot["sourceRunId"], run_id)
+            self.assertEqual(snapshot["payload"]["detectedToolKeys"], ["codex"])
+            self.assertEqual(
+                snapshot["payload"]["tools"],
+                [{"name": "Codex", "allTimeTokens": 128}],
+            )
             self.assertEqual(snapshot["payload"]["totalTokens"], 128)
 
     def test_history_backfill_snapshot_only_failure_is_failed_and_retries_only_snapshot(self):

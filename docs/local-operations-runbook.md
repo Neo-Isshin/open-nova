@@ -14,7 +14,7 @@ Scope: Actanara · Local macOS and Linux runtime
 
 The README explains the product and provides a quick start. This Runbook covers the complete operating path from pre-install checks through first-run setup, historical backfill, daily Pipeline use, Dashboard, Nova-Task, `nova-RAG`, updates, backups, and troubleshooting.
 
-In this guide, an **agent runtime** means an AI tool environment with its own sessions, logs, memory, and execution context, such as Codex, Claude Code, Gemini CLI, OpenClaw, or Hermes.
+In this guide, an **agent runtime** means an AI tool environment with its own sessions, logs, memory, and execution context, such as Codex, Claude Code, Gemini CLI, OpenClaw, Hermes, OpenCode, Antigravity, or Cursor.
 
 ## 2. Version and Release Boundaries
 

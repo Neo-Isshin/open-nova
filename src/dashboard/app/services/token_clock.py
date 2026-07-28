@@ -13,9 +13,15 @@ from pathlib import Path
 from typing import Any
 from collections import defaultdict
 import config
+from data_foundation.external_tool_catalog import detect_external_tools
 from data_foundation.session_files import is_openclaw_session_file
 from data_foundation.time import DEFAULT_BUSINESS_DAY_START_HOUR, business_date_for, resolve_timezone
-from data_foundation.settings import default_external_tool_settings, external_tool_path, resolve_external_tool_paths
+from data_foundation.settings import (
+    default_external_tool_settings,
+    external_tool_path,
+    resolve_external_tool_paths,
+)
+from data_foundation.runtime_sources import AntigravityRuntime, OpenCodeRuntime
 from data_foundation.token_semantics import (
     authoritative_semantics,
     cache_hit_rate,
@@ -74,6 +80,9 @@ TOOL_DEFS = [
     {"name": "Gemini CLI", "emoji": TOOL_EMOJI["Gemini CLI"], "color": "#3B82F6"},
     {"name": "Codex", "emoji": TOOL_EMOJI["Codex"], "color": "#10B981"},
     {"name": "Hermes", "emoji": TOOL_EMOJI["Hermes"], "color": "#F59E0B"},
+    {"name": "OpenCode", "emoji": TOOL_EMOJI["OpenCode"], "color": "#0EA5A4"},
+    {"name": "Antigravity", "emoji": TOOL_EMOJI["Antigravity"], "color": "#6366F1"},
+    {"name": "Cursor", "emoji": TOOL_EMOJI["Cursor"], "color": "#7C3AED", "usageStatus": "unavailable"},
 ]
 
 # ── OpenClaw session 文件扫描公共函数 ──
@@ -503,6 +512,58 @@ def _scan_hermes(today_str: str, current_hour: int) -> list[dict]:
     return entries
 
 
+def _scan_opencode(today_str: str, current_hour: int) -> list[dict]:
+    del today_str, current_hour
+    runtime = OpenCodeRuntime(_external_tool_path("opencode", "home"))
+    return _normalized_runtime_usage_entries(runtime)
+
+
+def _scan_antigravity(today_str: str, current_hour: int) -> list[dict]:
+    del today_str, current_hour
+    runtime = AntigravityRuntime(
+        {
+            "cli": _external_tool_path("antigravity", "cliHome"),
+            "ide": _external_tool_path("antigravity", "ideHome"),
+            "app": _external_tool_path("antigravity", "appHome"),
+        }
+    )
+    return _normalized_runtime_usage_entries(runtime)
+
+
+def _normalized_runtime_usage_entries(runtime) -> list[dict]:
+    sessions = {record.external_session_key: record for record in runtime.sessions()}
+    entries = []
+    for record in runtime.usage():
+        session = sessions.get(record.external_session_key)
+        cwd = session.initial_cwd if session is not None else None
+        resolved = resolve_usage_group(
+            runtime.tool_key,
+            cwd=cwd,
+            initial_cwd=cwd,
+            metadata=record.metadata,
+            fallback="",
+        )
+        entries.append(
+            {
+                "input": int(record.input_tokens or 0),
+                "output": int(record.output_tokens or 0),
+                "cacheRead": int(record.cache_read_tokens or 0),
+                "cacheWrite": int(record.cache_write_tokens or 0),
+                "reasoning": int(record.reasoning_tokens or 0),
+                "toolTokens": int(record.tool_tokens or 0),
+                "protocolTotal": record.protocol_total_tokens,
+                "timestamp": record.occurred_at.isoformat(),
+                "message_count": int(record.message_count or 1),
+                "model": record.model_key or (session.model_key if session else None) or "",
+                "usageGroup": resolved.group,
+                "usageGroupSource": resolved.source,
+                "usageGroupConfidence": resolved.confidence,
+                "sourceVariant": record.source_variant,
+            }
+        )
+    return entries
+
+
 def _filter_today(entries: list[dict], today_str: str) -> list[dict]:
     """Filter entries to the configured 04:00 business date, parse timestamps, add local hour."""
     result = []
@@ -540,12 +601,12 @@ def _aggregate(entries: list[dict], current_hour: int) -> dict:
         out = e.get("output", 0)
         cr = e.get("cacheRead", 0)
         cw = e.get("cacheWrite", 0)
-        t = protocol_total({"input": inp, "output": out, "cacheRead": cr})
+        t = _entry_protocol_total(e)
         total_tokens += t
         total_input += int(inp or 0)
         total_cache_read += int(cr or 0)
         cache_write += int(cw or 0)
-        legacy_total += legacy_operational_total({"input": inp, "output": out, "cacheRead": cr, "cacheWrite": cw})
+        legacy_total += _entry_legacy_operational_total(e)
         hourly_timeline[e["_hour"]]["tokens"] += t
         hourly_timeline[e["_hour"]]["messages"] += 1
         if e["_hour"] == current_hour:
@@ -573,9 +634,9 @@ def _aggregate_workspace_usage(all_filtered: list[tuple[str, list[dict], dict]],
         for entry in entries:
             group = entry.get("usageGroup") or tool_name
             row = usage[(tool_name, group)]
-            tokens = protocol_total(entry)
+            tokens = _entry_protocol_total(entry)
             row["tokens"] += tokens
-            row["legacyOperationalTokens"] += legacy_operational_total(entry)
+            row["legacyOperationalTokens"] += _entry_legacy_operational_total(entry)
             row["cacheWrite"] += int(entry.get("cacheWrite", 0) or 0)
             row["messages"] += entry.get("message_count", 1) or 1
             if entry.get("_hour") == current_hour:
@@ -591,6 +652,20 @@ def _aggregate_workspace_usage(all_filtered: list[tuple[str, list[dict], dict]],
     ]
     result.sort(key=lambda item: item["tokens"], reverse=True)
     return result
+
+
+def _entry_protocol_total(entry: dict) -> int:
+    explicit = entry.get("protocolTotal")
+    if explicit is not None:
+        try:
+            return max(0, int(explicit))
+        except (TypeError, ValueError, OverflowError):
+            pass
+    return protocol_total(entry)
+
+
+def _entry_legacy_operational_total(entry: dict) -> int:
+    return _entry_protocol_total(entry) + int(entry.get("cacheWrite", 0) or 0)
 
 
 def _rate_emoji(hourly_tokens: int) -> str:
@@ -612,15 +687,36 @@ _SCANNERS = [
     ("Gemini CLI", _scan_gemini),
     ("Codex", _scan_codex),
     ("Hermes", _scan_hermes),
+    ("OpenCode", _scan_opencode),
+    ("Antigravity", _scan_antigravity),
 ]
+
+_TOOL_ID_BY_NAME = {
+    "OpenClaw": "openclaw",
+    "Claude Code": "claudeCode",
+    "Gemini CLI": "geminiCli",
+    "Codex": "codex",
+    "Hermes": "hermes",
+    "OpenCode": "opencode",
+    "Antigravity": "antigravity",
+    "Cursor": "cursor",
+}
+_USAGE_UNAVAILABLE_TOOL_IDS = {"cursor"}
+
 
 def _live_token_semantics() -> dict:
     tz = local_timezone()
-    return authoritative_semantics(
+    semantics = authoritative_semantics(
         scope="multi-tool live operational status",
         day_boundary=f"{getattr(tz, 'key', str(tz))} business day 04:00-03:59",
         live=True,
     )
+    semantics["runtimeOverrides"] = {
+        "OpenCode": "source protocol total includes separately reported reasoning and excludes cache writes",
+        "Antigravity": "source protocol total also includes local reasoning and tool token fields",
+    }
+    semantics["usageUnavailable"] = ["Cursor"]
+    return semantics
 
 
 def get_token_clock_data() -> dict:
@@ -645,7 +741,29 @@ def _get_token_clock_data_unlocked() -> dict:
 
     all_filtered = []
     source_errors: list[dict[str, str]] = []
+    try:
+        detection = detect_external_tools()
+        detected_values = detection.get(
+            "detectedToolKeys",
+            detection.get("detectedToolIds", ()),
+        )
+        detected_tool_ids = {
+            str(tool_id)
+            for tool_id in detected_values
+        }
+    except Exception as exc:
+        logger.warning("Token clock external tool detection failed: %s", exc)
+        detected_tool_ids = set()
+        source_errors.append(source_error("external-tool-detection"))
+
     for name, scanner_fn in _SCANNERS:
+        tool_id = _TOOL_ID_BY_NAME.get(name)
+        if (
+            tool_id is None
+            or tool_id not in detected_tool_ids
+            or tool_id in _USAGE_UNAVAILABLE_TOOL_IDS
+        ):
+            continue
         try:
             raw_entries = scanner_fn(today_str, current_hour)
         except Exception as exc:

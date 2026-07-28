@@ -21,6 +21,10 @@ from data_foundation.paths import initialize_home
 from data_foundation.settings import write_settings
 
 
+def _detected(*tool_ids: str) -> dict:
+    return {"detectedToolKeys": list(tool_ids)}
+
+
 class DashboardLiveTokenSemanticsTests(unittest.TestCase):
     def test_token_clock_uses_foundation_protocol_total(self):
         fixed_now = datetime(2026, 5, 19, 12, 0, 0, tzinfo=token_clock.local_timezone())
@@ -40,6 +44,7 @@ class DashboardLiveTokenSemanticsTests(unittest.TestCase):
         with (
             patch.object(token_clock, "_now_local", return_value=fixed_now),
             patch.object(token_clock, "_SCANNERS", [("OpenClaw", scanner)]),
+            patch.object(token_clock, "detect_external_tools", return_value=_detected("openclaw")),
         ):
             data = token_clock.get_token_clock_data()
 
@@ -76,6 +81,11 @@ class DashboardLiveTokenSemanticsTests(unittest.TestCase):
         with (
             patch.object(token_clock, "_now_local", return_value=fixed_now),
             patch.object(token_clock, "_SCANNERS", [("OpenClaw", good_scanner), ("Codex", broken_scanner)]),
+            patch.object(
+                token_clock,
+                "detect_external_tools",
+                return_value=_detected("openclaw", "codex"),
+            ),
         ):
             data = token_clock.get_token_clock_data()
 
@@ -95,6 +105,7 @@ class DashboardLiveTokenSemanticsTests(unittest.TestCase):
             patch.dict(os.environ, {"TARGET_TIMEZONE": "UTC"}, clear=False),
             patch.object(token_clock, "_now_local", return_value=fixed_now),
             patch.object(token_clock, "_SCANNERS", []),
+            patch.object(token_clock, "detect_external_tools", return_value=_detected()),
         ):
             data = token_clock.get_token_clock_data()
 
@@ -125,6 +136,7 @@ class DashboardLiveTokenSemanticsTests(unittest.TestCase):
         with (
             patch.object(token_clock, "_now_local", return_value=fixed_now),
             patch.object(token_clock, "_SCANNERS", [("OpenClaw", scanner)]),
+            patch.object(token_clock, "detect_external_tools", return_value=_detected("openclaw")),
         ):
             data = token_clock.get_token_clock_data()
 
@@ -152,10 +164,46 @@ class DashboardLiveTokenSemanticsTests(unittest.TestCase):
         with (
             patch.object(token_clock, "_now_local", return_value=fixed_now),
             patch.object(token_clock, "_SCANNERS", [("Codex", scanner)]),
+            patch.object(token_clock, "detect_external_tools", return_value=_detected("codex")),
         ):
             data = token_clock.get_token_clock_data()
 
         self.assertEqual([item["name"] for item in data["workspaceUsage"]], ["actanara"])
+
+    def test_token_clock_runs_only_detected_usage_capable_scanners_and_keeps_zero_card(self):
+        fixed_now = datetime(2026, 5, 19, 12, 0, 0, tzinfo=token_clock.local_timezone())
+        calls = []
+
+        def opencode_scanner(_today, _hour):
+            calls.append("OpenCode")
+            return []
+
+        def must_not_run(_today, _hour):
+            self.fail("undetected or usage-unavailable scanner executed")
+
+        with (
+            patch.object(token_clock, "_now_local", return_value=fixed_now),
+            patch.object(
+                token_clock,
+                "_SCANNERS",
+                [
+                    ("OpenCode", opencode_scanner),
+                    ("Antigravity", must_not_run),
+                    ("Cursor", must_not_run),
+                ],
+            ),
+            patch.object(
+                token_clock,
+                "detect_external_tools",
+                return_value=_detected("opencode", "cursor"),
+            ),
+        ):
+            data = token_clock.get_token_clock_data()
+
+        self.assertEqual(calls, ["OpenCode"])
+        self.assertEqual([tool["name"] for tool in data["tools"]], ["OpenCode"])
+        self.assertEqual(data["tools"][0]["tokens"], 0)
+        self.assertEqual(data["tools"][0]["messages"], 0)
 
     def test_token_clock_codex_normalizes_cached_input_when_reported_total_excludes_cache_detail(self):
         with tempfile.TemporaryDirectory() as tmp:

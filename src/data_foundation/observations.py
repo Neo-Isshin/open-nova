@@ -109,6 +109,8 @@ def _observation_roots(
         _mapped_tool_home(tool_homes, "codex", "codex", default_external_tool_path("codex", "home")) / "config.toml",
         _mapped_tool_home(tool_homes, "gemini-cli", "geminiCli", default_external_tool_path("geminiCli", "home")) / "settings.json",
         _mapped_tool_home(tool_homes, "hermes", "hermes", default_external_tool_path("hermes", "home")) / "config.yaml",
+        _tool_home("opencode", "configPath", default_external_tool_path("opencode", "configPath")),
+        _tool_home("cursor", "configPath", default_external_tool_path("cursor", "configPath")),
     ]
     present_configs = [item for item in configs if item.exists()]
     rows.append(
@@ -146,6 +148,9 @@ def observe_non_rag_assets(
         "gemini-cli": _tool_home("geminiCli", "home", default_external_tool_path("geminiCli", "home")),
         "codex": _tool_home("codex", "home", default_external_tool_path("codex", "home")),
         "hermes": _tool_home("hermes", "home", default_external_tool_path("hermes", "home")),
+        "opencode": _tool_home("opencode", "home", default_external_tool_path("opencode", "home")),
+        "antigravity": _tool_home("antigravity", "home", default_external_tool_path("antigravity", "home")),
+        "cursor": _tool_home("cursor", "home", default_external_tool_path("cursor", "home")),
     }
     rows = _observation_roots(
         openclaw_root=oc_root,

@@ -24,6 +24,9 @@ TOOL_EMOJI = {
     "Gemini CLI": "✨",
     "Codex": "🤖",
     "Hermes": "⚕️",
+    "OpenCode": "🐙",
+    "Antigravity": "🛡️",
+    "Cursor": "🖱️",
 }
 
 CONTAINER_WORKSPACE_NAMES = {
@@ -155,6 +158,10 @@ def _normalize_tool_key(value: str | None) -> str:
         "openclaw": "openclaw",
         "codex": "codex",
         "hermes": "hermes",
+        "opencode": "opencode",
+        "open code": "opencode",
+        "antigravity": "antigravity",
+        "cursor": "cursor",
     }
     return aliases.get(normalized, normalized)
 

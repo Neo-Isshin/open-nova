@@ -22,11 +22,34 @@ from data_foundation.settings import write_settings
 from data_foundation.snapshots import (
     _foundation_ai_assets_non_rag_payload,
     _foundation_workspace_usage_from_events,
+    apply_external_tool_visibility,
     materialize_ai_assets_non_rag_snapshot,
     read_dashboard_snapshot,
     read_rag_daily_status_snapshot,
     write_rag_daily_status_snapshot,
 )
+
+
+def _tool_detection(*tool_ids: str) -> dict:
+    return {
+        "detectedToolKeys": list(tool_ids),
+        "toolPresence": {
+            tool_id: {
+                "id": tool_id,
+                "detected": tool_id in tool_ids,
+            }
+            for tool_id in (
+                "openclaw",
+                "claudeCode",
+                "codex",
+                "geminiCli",
+                "hermes",
+                "opencode",
+                "antigravity",
+                "cursor",
+            )
+        },
+    }
 
 
 class DashboardSnapshotTests(unittest.TestCase):
@@ -39,11 +62,118 @@ class DashboardSnapshotTests(unittest.TestCase):
     def test_non_rag_snapshot_round_trips_materialized_payload(self):
         with tempfile.TemporaryDirectory() as tmp:
             paths, run_id = self._home(Path(tmp))
-            payload = {"tools": [{"name": "Codex"}], "storage": {"tools": [], "categories": []}}
-            materialize_ai_assets_non_rag_snapshot(paths, run_id, builder=lambda: payload)
+            payload = {
+                "tools": [
+                    {
+                        "name": "Codex",
+                        "allTimeTokens": 7,
+                        "allTimeMessages": 2,
+                        "sessionCount": 1,
+                    }
+                ],
+                "storage": {"tools": [], "categories": []},
+            }
+            with patch(
+                "data_foundation.snapshots.detect_external_tools",
+                return_value=_tool_detection("codex"),
+            ):
+                materialize_ai_assets_non_rag_snapshot(
+                    paths,
+                    run_id,
+                    builder=lambda: payload,
+                )
             snapshot = read_dashboard_snapshot(paths)
-            self.assertEqual(snapshot["payload"], payload)
+            self.assertEqual(snapshot["payload"]["tools"], payload["tools"])
+            self.assertEqual(snapshot["payload"]["detectedToolKeys"], ["codex"])
+            self.assertEqual(snapshot["payload"]["totalTokens"], 7)
+            self.assertEqual(snapshot["payload"]["totalMessages"], 2)
+            self.assertEqual(snapshot["payload"]["totalSessions"], 1)
             self.assertEqual(snapshot["projectionType"], "foundation-ai-assets-non-rag-v2")
+
+    def test_external_tool_visibility_filters_every_runtime_card_collection(self):
+        payload = {
+            "tools": [
+                {
+                    "name": "Codex",
+                    "allTimeTokens": 11,
+                    "allTimeMessages": 2,
+                    "sessionCount": 1,
+                },
+                {
+                    "name": "Cursor",
+                    "allTimeTokens": 0,
+                    "allTimeMessages": 3,
+                    "sessionCount": 2,
+                    "usageStatus": "unavailable",
+                },
+                {
+                    "name": "OpenCode",
+                    "allTimeTokens": 99,
+                    "allTimeMessages": 9,
+                    "sessionCount": 4,
+                },
+            ],
+            "agents": [
+                {"name": "Codex", "source": "Codex"},
+                {"name": "Cursor", "source": "Cursor"},
+                {"name": "OpenCode", "source": "OpenCode"},
+            ],
+            "agentCount": 3,
+            "agentTree": [
+                {"name": "Codex"},
+                {"name": "Cursor"},
+                {"name": "OpenCode"},
+            ],
+            "storage": {
+                "tools": [
+                    {"name": "Codex"},
+                    {"name": "Cursor"},
+                    {"name": "OpenCode"},
+                ],
+                "categories": [{"label": "Diary"}],
+            },
+            "skills": {
+                "byTool": {
+                    "Codex": [{"id": "one"}],
+                    "Cursor": [{"id": "two"}],
+                    "OpenCode": [{"id": "three"}],
+                },
+                "total": 3,
+            },
+            "toolConfigs": [
+                {"name": "Codex"},
+                {"name": "Cursor"},
+                {"name": "OpenCode"},
+            ],
+            "workspaceUsage": [{"tool": "OpenCode", "tokens": 99}],
+        }
+
+        filtered = apply_external_tool_visibility(
+            payload,
+            _tool_detection("codex", "cursor"),
+        )
+
+        for field in ("tools", "agents", "agentTree", "toolConfigs"):
+            self.assertEqual(
+                [item["name"] for item in filtered[field]],
+                ["Codex", "Cursor"],
+            )
+        self.assertEqual(
+            [item["name"] for item in filtered["storage"]["tools"]],
+            ["Codex", "Cursor"],
+        )
+        self.assertEqual(
+            list(filtered["skills"]["byTool"]),
+            ["Codex", "Cursor"],
+        )
+        self.assertEqual(filtered["skills"]["total"], 2)
+        self.assertEqual(filtered["agentCount"], 2)
+        self.assertEqual(filtered["totalTokens"], 11)
+        self.assertEqual(filtered["totalMessages"], 5)
+        self.assertEqual(filtered["totalSessions"], 3)
+        self.assertEqual(filtered["tools"][1]["usageStatus"], "unavailable")
+        self.assertEqual(filtered["detectedToolKeys"], ["codex", "cursor"])
+        self.assertEqual(filtered["workspaceUsage"], payload["workspaceUsage"])
 
     def test_rag_daily_status_snapshot_round_trips_by_business_date(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -64,12 +194,12 @@ class DashboardSnapshotTests(unittest.TestCase):
                 "tools": [{"name": "Codex", "allTimeTokens": 42}],
                 "models": [{"name": "gpt-test", "tokens": 42}],
                 "workspaceUsage": [{"name": "actanara", "tool": "Codex", "emoji": "🤖", "tokens": 42}],
-                "agents": [{"displayName": "🤖 Codex", "model": "gpt-test"}],
+                "agents": [{"displayName": "🤖 Codex", "model": "gpt-test", "source": "Codex"}],
                 "agentCount": 1,
                 "trend30d": [{"date": "2026-06-05", "slots": {"上午": 42}}],
                 "diary": {"count": 1},
                 "memory": {"sessionFiles": 1},
-                "skills": {"byTool": {"Codex": []}},
+                "skills": {"byTool": {"Codex": []}, "total": 0},
                 "git": {"commits": 1},
                 "cronJobs": {"total": 1},
                 "storage": {"tools": [], "categories": []},
@@ -83,6 +213,10 @@ class DashboardSnapshotTests(unittest.TestCase):
                 patch.object(ai_assets, "get_ai_assets_incremental", return_value=dict(expected)) as incremental,
                 patch.object(ai_assets, "_get_detailed_storage", return_value=storage) as detailed_storage,
                 patch.object(ai_assets, "_get_rag_stats", return_value=rag_status) as rag_stats,
+                patch(
+                    "data_foundation.snapshots.detect_external_tools",
+                    return_value=_tool_detection("codex"),
+                ),
             ):
                 materialize_ai_assets_non_rag_snapshot(paths, run_id, business_date=date(2026, 5, 19))
 
@@ -91,7 +225,19 @@ class DashboardSnapshotTests(unittest.TestCase):
             rag_snapshot = read_rag_daily_status_snapshot(paths, date(2026, 5, 19))
 
             self.assertEqual(snapshot["projectionType"], "foundation-ai-assets-non-rag-v2")
-            self.assertEqual(payload, {**expected, "storage": storage, "rag": rag_status})
+            self.assertEqual(
+                payload,
+                {
+                    **expected,
+                    "storage": storage,
+                    "rag": rag_status,
+                    "detectedToolKeys": ["codex"],
+                    "toolPresence": _tool_detection("codex")["toolPresence"],
+                    "totalTokens": 42,
+                    "totalMessages": 0,
+                    "totalSessions": 0,
+                },
+            )
             self.assertEqual(rag_snapshot["payload"], {"businessDate": "2026-05-19", **rag_status})
             incremental.assert_called_once_with(include_rag=False)
             detailed_storage.assert_called_once_with(include_rag=True)
@@ -241,11 +387,24 @@ class DashboardSnapshotTests(unittest.TestCase):
                 "tools": [{"name": "Codex", "allTimeTokens": 42}],
                 "storage": {"tools": [], "categories": [{"label": "正式日记", "sizeMB": 1.0}]},
             })
-            materialize_ai_assets_non_rag_snapshot(paths, run_id, builder=lambda: payload)
+            with patch(
+                "data_foundation.snapshots.detect_external_tools",
+                return_value=_tool_detection("codex"),
+            ):
+                materialize_ai_assets_non_rag_snapshot(
+                    paths,
+                    run_id,
+                    builder=lambda: payload,
+                )
             write_settings({"runtimeSources": {"dashboardReadSource": "foundation"}}, paths)
             ai_assets._cache = {"data": None, "ts": 0}
             with (
                 patch.dict(os.environ, {"ACTANARA_HOME": str(paths.home)}),
+                patch.object(
+                    ai_assets,
+                    "_current_external_tool_detection",
+                    return_value=_tool_detection("codex"),
+                ),
                 patch.object(ai_assets, "get_ai_assets", side_effect=AssertionError("live non-RAG assembly called")),
                 patch.object(ai_assets, "_get_rag_stats", side_effect=AssertionError("live RAG status called")),
                 patch.object(ai_assets, "_rag_storage_category", side_effect=AssertionError("live RAG storage scan called")),
@@ -285,6 +444,45 @@ class DashboardSnapshotTests(unittest.TestCase):
                 configs = ai_assets.discover_tool_configs(persist=False)
             self.assertIsInstance(configs, list)
             self.assertFalse(snapshot_path.exists())
+
+    def test_tool_config_refresh_response_contains_only_currently_detected_tools(self):
+        configs = [
+            {"name": "Codex", "status": "detected"},
+            # Cursor can be present through IDE state.vscdb while its CLI home
+            # is absent, so the legacy config probe can still say "missing".
+            {"name": "Cursor", "status": "missing"},
+            {"name": "OpenCode", "status": "missing"},
+        ]
+        original_cache = ai_assets._cache
+        ai_assets._cache = {"data": {"stale": True}, "ts": 7}
+        self.addCleanup(setattr, ai_assets, "_cache", original_cache)
+        with (
+            patch.object(ai_assets, "discover_tool_configs", return_value=configs),
+            patch.object(
+                ai_assets,
+                "_current_external_tool_detection",
+                return_value=_tool_detection("codex", "cursor"),
+            ),
+            patch.object(
+                ai_assets,
+                "_tool_config_snapshot_path",
+                return_value=Path("/tmp/tool-configs.json"),
+            ),
+        ):
+            result = ai_assets.refresh_tool_configs_with_metadata()
+
+        self.assertEqual(
+            [item["name"] for item in result["toolConfigs"]],
+            ["Codex", "Cursor"],
+        )
+        self.assertEqual(
+            [item["status"] for item in result["toolConfigs"]],
+            ["detected", "detected"],
+        )
+        self.assertEqual(result["detectedToolKeys"], ["codex", "cursor"])
+        self.assertEqual(result["toolPresence"], _tool_detection("codex", "cursor")["toolPresence"])
+        self.assertIsNone(ai_assets._cache["data"])
+        self.assertEqual(ai_assets._cache["ts"], 0)
 
     def test_incremental_ai_assets_usage_cache_reuses_unchanged_source_files(self):
         with tempfile.TemporaryDirectory() as tmp:

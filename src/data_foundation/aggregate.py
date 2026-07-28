@@ -162,7 +162,16 @@ def daily_project_totals(paths: RuntimePaths, business_date: date) -> list[dict[
     return [dict(row) for row in rows]
 
 
-DIARY_TOOL_KEYS = ("openclaw", "gemini-cli", "claude-code", "hermes", "codex", "cron")
+DIARY_TOOL_KEYS = (
+    "openclaw",
+    "gemini-cli",
+    "claude-code",
+    "hermes",
+    "codex",
+    "opencode",
+    "antigravity",
+    "cron",
+)
 
 
 def daily_diary_usage_metrics(paths: RuntimePaths, business_date: date) -> dict | None:
@@ -217,6 +226,8 @@ def daily_diary_usage_metrics(paths: RuntimePaths, business_date: date) -> dict 
     }
     for tool_key in DIARY_TOOL_KEYS:
         row = by_tool.get(tool_key)
+        if row is None and tool_key in {"opencode", "antigravity"}:
+            continue
         values = {
             "input_tokens": int(row["input_tokens"] or 0) if row else 0,
             "output_tokens": int(row["output_tokens"] or 0) if row else 0,

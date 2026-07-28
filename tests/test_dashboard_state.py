@@ -45,6 +45,10 @@ from app.services.dashboard_state import (
 )
 
 
+def _detected(*tool_ids: str) -> dict:
+    return {"detectedToolKeys": list(tool_ids)}
+
+
 class DashboardStateTests(unittest.TestCase):
     def test_state_helpers_normalize_errors_without_raw_exception_details(self):
         marker = "secret-token=do-not-leak /Users/operator/private.db"
@@ -118,6 +122,11 @@ class DashboardStateTests(unittest.TestCase):
                     "_SCANNERS",
                     [("OpenClaw", good_scanner), ("Hermes", token_clock._scan_hermes)],
                 ),
+                patch.object(
+                    token_clock,
+                    "detect_external_tools",
+                    return_value=_detected("openclaw", "hermes"),
+                ),
                 patch.object(token_clock, "_external_tool_path", return_value=malformed_db),
             ):
                 result = token_clock.get_token_clock_data()
@@ -151,6 +160,11 @@ class DashboardStateTests(unittest.TestCase):
                     patch.object(token_clock, "_now_local", return_value=fixed_now),
                     patch.object(token_clock, "_external_tool_path", return_value=root),
                     patch.object(token_clock, "_SCANNERS", [(name, scanner)]),
+                    patch.object(
+                        token_clock,
+                        "detect_external_tools",
+                        return_value=_detected(token_clock._TOOL_ID_BY_NAME[name]),
+                    ),
                 ):
                     result = token_clock.get_token_clock_data()
 
@@ -171,6 +185,7 @@ class DashboardStateTests(unittest.TestCase):
                 patch.object(token_clock, "_now_local", return_value=fixed_now),
                 patch.object(token_clock, "_external_tool_path", return_value=root),
                 patch.object(token_clock, "_SCANNERS", [("OpenClaw", token_clock._scan_openclaw)]),
+                patch.object(token_clock, "detect_external_tools", return_value=_detected("openclaw")),
             ):
                 malformed = token_clock.get_token_clock_data()
 
@@ -194,6 +209,7 @@ class DashboardStateTests(unittest.TestCase):
                 patch.object(token_clock, "_now_local", return_value=fixed_now),
                 patch.object(token_clock, "_external_tool_path", return_value=root),
                 patch.object(token_clock, "_SCANNERS", [("OpenClaw", token_clock._scan_openclaw)]),
+                patch.object(token_clock, "detect_external_tools", return_value=_detected("openclaw")),
             ):
                 recovered = token_clock.get_token_clock_data()
 

@@ -5,7 +5,7 @@
 <p align="center">
   <strong>Your agents do valuable work. Actanara makes sure it does not disappear with the session.</strong>
   <br>
-  Turn sessions, tasks, and evidence from Codex, Claude Code, Gemini CLI, OpenClaw, and Hermes into local assets you can find, reuse, and revisit.
+  Turn sessions, tasks, and evidence from Codex, Claude Code, Gemini CLI, OpenClaw, Hermes, OpenCode, Antigravity, and Cursor into local assets you can find, reuse, and revisit.
 </p>
 
 <p align="center">
@@ -56,7 +56,7 @@ Actanara breaks down those barriers: work completed in Claude Code can be found 
 - **User-controlled integrations:** Tool skills, external-runtime definitions, and critical settings remain visible, editable, and auditable.
 - **Protected Agentic RAG:** `nova-RAG` manages retrieval quality through evaluation, candidate promotion, recall calibration, and safe rollback, while exposing only a restricted read-only contract to external runtimes.
 
-> In this README, an **agent runtime** means an AI tool environment with its own sessions, logs, memory, and execution context, such as Codex, Claude Code, Gemini CLI, OpenClaw, or Hermes.
+> In this README, an **agent runtime** means an AI tool environment with its own sessions, logs, memory, and execution context, such as Codex, Claude Code, Gemini CLI, OpenClaw, Hermes, OpenCode, Antigravity, or Cursor.
 
 <a id="install-actanara"></a>
 ## Install Actanara
@@ -160,7 +160,7 @@ nova-RAG (optional) → Read-only Retrieval for External Runtimes
 - ⏱️ **Linux services:** Dashboard, scheduling, and optional RAG use user-level systemd units. When a controlling terminal is available, the installer asks whether they should continue after logout before making a no-`sudo` linger request. Non-interactive installs preserve linger unless `--enable-linger` or `--require-linger` is explicit.
 - 🪟 **Windows:** Not a supported one-line target; some components can still be run from source by advanced users.
 
-**Currently supported agent runtimes:** 🦞 OpenClaw · ✳️ Claude Code · 🤖 Codex · ✨ Gemini CLI · ⚕️ Hermes. What can be collected depends on whether compatible logs exist locally and whether their paths are enabled; additional runtimes and broader cross-platform support are planned for future releases.
+**Currently supported agent runtimes:** 🦞 OpenClaw · ✳️ Claude Code · 🤖 Codex · ✨ Gemini CLI · ⚕️ Hermes · 🐙 OpenCode · 🛡️ Antigravity · 🖱️ Cursor. Collection depends on compatible local records and enabled paths. Cursor currently contributes local session/workspace records and explicit dialogue content; Actanara does not call Cursor cloud APIs or infer missing token usage.
 
 ## 📊 Dashboard, Screenshots, and Interactive Demo
 

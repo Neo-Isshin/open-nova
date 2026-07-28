@@ -5,12 +5,17 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+from datetime import datetime
 from pathlib import Path
-from typing import Iterable, Iterator
+from typing import Any, Iterable, Iterator, Mapping
 
 from ..paths import RuntimePaths
 from ..session_files import is_openclaw_session_file
 from ..settings import default_external_tool_path, external_tool_path, resolve_external_tool_paths
+from ..runtime_sources.antigravity import AntigravityRuntime
+from ..runtime_sources.base import SessionRecord, UsageRecord
+from ..runtime_sources.cursor import CursorRuntime
+from ..runtime_sources.opencode import OpenCodeRuntime
 from ..time import parse_timestamp
 from ..token_semantics import normalize_cached_input_detail
 from .base import Cursor, NormalizedEvent, SourceArtifact
@@ -367,6 +372,167 @@ class CronAdapter(UsageAdapter):
                 yield event
 
 
+class LocalRuntimeAdapter(UsageAdapter):
+    """Bridge one normalized local-runtime parser into Foundation ingestion."""
+
+    adapter_version = "local-runtime-v1"
+    capabilities = UsageAdapter.capabilities | {"workspace_metadata", "dialogue"}
+
+    def __init__(self, runtime: Any, source_root: Path):
+        self.runtime = runtime
+        self.source_root = Path(source_root).expanduser()
+        runtime_capabilities = getattr(runtime, "capabilities", ())
+        self.capabilities = set(self.capabilities) | set(runtime_capabilities)
+        if getattr(runtime, "usage_status", "") == "unavailable":
+            self.capabilities.discard("usage_events")
+            self.capabilities.add("usage_unavailable")
+
+    def discover_sources(self) -> Iterable[SourceArtifact]:
+        artifacts = tuple(self.runtime.artifacts())
+        if not artifacts:
+            return ()
+        coordinator = self.source_root if self.source_root.exists() else artifacts[0]
+        return (SourceArtifact(self.tool_key, coordinator, "local_runtime_inventory"),)
+
+    def read_incremental(
+        self,
+        artifact: SourceArtifact,
+        cursor: Cursor | None = None,
+    ) -> Iterable[NormalizedEvent]:
+        del cursor
+        sessions = tuple(self.runtime.sessions())
+        sessions_by_key = {record.external_session_key: record for record in sessions}
+        for record in sessions:
+            event = self._session_event(artifact, record)
+            if event is not None:
+                yield event
+        for record in self.runtime.usage():
+            event = self._normalized_usage_event(
+                artifact,
+                record,
+                sessions_by_key.get(record.external_session_key),
+            )
+            if event is not None:
+                yield event
+
+    def _session_event(
+        self,
+        artifact: SourceArtifact,
+        record: SessionRecord,
+    ) -> NormalizedEvent | None:
+        occurred_at = record.last_active_at or record.started_at or _artifact_timestamp(artifact.path)
+        if occurred_at is None:
+            return None
+        metadata = {
+            **record.metadata,
+            "source_variant": record.source_variant,
+            "usage_status": getattr(self.runtime, "usage_status", "available"),
+        }
+        return NormalizedEvent(
+            tool_key=self.tool_key,
+            external_event_key=self._event_key(
+                artifact,
+                f"session:{record.external_session_key}",
+            ),
+            external_session_key=record.external_session_key,
+            occurred_at=occurred_at,
+            event_type="session",
+            payload={
+                "started_at": record.started_at,
+                "last_active_at": record.last_active_at,
+                "initial_cwd": record.initial_cwd,
+                "title": record.title,
+                "agent_key": record.agent_key,
+                "model_key": record.model_key,
+                "source_variant": record.source_variant,
+                "usage_status": getattr(self.runtime, "usage_status", "available"),
+                "raw_locator": record.raw_locator,
+                "metadata": metadata,
+            },
+        )
+
+    def _normalized_usage_event(
+        self,
+        artifact: SourceArtifact,
+        record: UsageRecord,
+        session: SessionRecord | None,
+    ) -> NormalizedEvent | None:
+        occurred_at = parse_timestamp(record.occurred_at)
+        if occurred_at is None:
+            return None
+        metadata = {
+            **record.metadata,
+            "source_variant": record.source_variant,
+            "tool_tokens": int(record.tool_tokens or 0),
+        }
+        if session is not None:
+            if session.initial_cwd:
+                metadata.setdefault("cwd", session.initial_cwd)
+            if session.title:
+                metadata.setdefault("session_title", session.title)
+        return NormalizedEvent(
+            tool_key=self.tool_key,
+            external_event_key=record.external_event_key,
+            external_session_key=record.external_session_key,
+            occurred_at=occurred_at,
+            event_type="usage",
+            payload={
+                "model_key": record.model_key or (session.model_key if session else None) or "unknown",
+                "input_tokens": int(record.input_tokens or 0),
+                "output_tokens": int(record.output_tokens or 0),
+                "cache_read_tokens": int(record.cache_read_tokens or 0),
+                "cache_write_tokens": int(record.cache_write_tokens or 0),
+                "reasoning_tokens": int(record.reasoning_tokens or 0),
+                "protocol_total_tokens": record.protocol_total_tokens,
+                "message_count": int(record.message_count or 1),
+                "raw_locator": record.raw_locator,
+                "metadata": metadata,
+            },
+        )
+
+
+class OpenCodeAdapter(LocalRuntimeAdapter):
+    tool_key = "opencode"
+
+    def __init__(self, home: Path | None = None):
+        selected = home or default_external_tool_path("opencode", "home")
+        super().__init__(OpenCodeRuntime(selected), selected)
+
+
+class AntigravityAdapter(LocalRuntimeAdapter):
+    tool_key = "antigravity"
+
+    def __init__(self, variant_homes: Mapping[str, Path] | None = None):
+        selected = dict(variant_homes or {
+            "cli": default_external_tool_path("antigravity", "cliHome"),
+            "ide": default_external_tool_path("antigravity", "ideHome"),
+            "app": default_external_tool_path("antigravity", "appHome"),
+        })
+        common_home = _common_runtime_home(selected.values())
+        super().__init__(AntigravityRuntime(selected), common_home)
+
+
+class CursorRuntimeAdapter(LocalRuntimeAdapter):
+    tool_key = "cursor"
+
+    def __init__(
+        self,
+        home: Path | None = None,
+        *,
+        ide_state_dbs: Iterable[Path] = (),
+        workspace_storage_roots: Iterable[Path] = (),
+    ):
+        selected = home or default_external_tool_path("cursor", "home")
+        super().__init__(
+            CursorRuntime(
+                selected,
+                ide_state_dbs=ide_state_dbs,
+                workspace_storage_roots=workspace_storage_roots,
+            ),
+            selected,
+        )
+
+
 def default_usage_adapters(paths: RuntimePaths | None = None) -> tuple[UsageAdapter, ...]:
     external_paths = _external_tool_paths(paths)
     return (
@@ -375,6 +541,21 @@ def default_usage_adapters(paths: RuntimePaths | None = None) -> tuple[UsageAdap
         CodexAdapter(_tool_path(external_paths, "codex", "sessionsRoot")),
         GeminiCliAdapter(_tool_path(external_paths, "geminiCli", "chatsRoot")),
         HermesAdapter(_tool_path(external_paths, "hermes", "stateDbPath")),
+        OpenCodeAdapter(_tool_path(external_paths, "opencode", "home")),
+        AntigravityAdapter({
+            variant: path
+            for variant, key in (
+                ("cli", "cliHome"),
+                ("ide", "ideHome"),
+                ("app", "appHome"),
+            )
+            if (path := _tool_path(external_paths, "antigravity", key)) is not None
+        }),
+        CursorRuntimeAdapter(
+            _tool_path(external_paths, "cursor", "home"),
+            ide_state_dbs=_tool_path_list(external_paths, "cursor", "ideStateDbCandidates"),
+            workspace_storage_roots=_tool_path_list(external_paths, "cursor", "workspaceStorageRoots"),
+        ),
         CronAdapter(_tool_path(external_paths, "openclaw", "cronRunsRoot")),
     )
 
@@ -389,6 +570,28 @@ def _external_tool_paths(paths: RuntimePaths | None = None) -> dict[str, dict]:
 def _tool_path(paths: dict[str, dict], tool: str, key: str) -> Path | None:
     value = paths.get(tool, {}).get(key)
     return value if isinstance(value, Path) else None
+
+
+def _tool_path_list(paths: dict[str, dict], tool: str, key: str) -> tuple[Path, ...]:
+    value = paths.get(tool, {}).get(key)
+    if not isinstance(value, list):
+        return ()
+    return tuple(item for item in value if isinstance(item, Path))
+
+
+def _common_runtime_home(paths: Iterable[Path]) -> Path:
+    selected = tuple(Path(path).expanduser() for path in paths)
+    if not selected:
+        return default_external_tool_path("antigravity", "home")
+    parents = {path.parent for path in selected}
+    return next(iter(parents)) if len(parents) == 1 else selected[0]
+
+
+def _artifact_timestamp(path: Path) -> datetime | None:
+    try:
+        return datetime.fromtimestamp(path.stat().st_mtime).astimezone()
+    except OSError:
+        return None
 
 
 def _external_tool_path(tool: str, key: str, fallback: Path) -> Path:

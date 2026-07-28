@@ -352,6 +352,32 @@ SETTINGS_AUTHORITY_GROUPS = (
             {"path": "externalTools.hermes.profilesRoot", "defaultSource": "~/.hermes/profiles"},
             {"path": "externalTools.hermes.configPath", "defaultSource": "~/.hermes/config.yaml"},
             {"path": "externalTools.hermes.binaryCandidates", "defaultSource": "~/.local/bin/hermes"},
+            {"path": "externalTools.opencode.home", "env": "OPENCODE_HOME", "defaultSource": "$XDG_DATA_HOME/opencode"},
+            {"path": "externalTools.opencode.databasePath", "defaultSource": "$XDG_DATA_HOME/opencode/opencode.db"},
+            {"path": "externalTools.opencode.storageRoot", "defaultSource": "$XDG_DATA_HOME/opencode/storage"},
+            {"path": "externalTools.opencode.configHome", "defaultSource": "$XDG_CONFIG_HOME/opencode"},
+            {"path": "externalTools.opencode.configPath", "defaultSource": "$XDG_CONFIG_HOME/opencode/opencode.jsonc"},
+            {"path": "externalTools.opencode.binaryCandidates", "defaultSource": "common user install paths"},
+            {"path": "externalTools.antigravity.home", "defaultSource": "~/.gemini"},
+            {"path": "externalTools.antigravity.cliHome", "defaultSource": "~/.gemini/antigravity-cli"},
+            {"path": "externalTools.antigravity.ideHome", "defaultSource": "~/.gemini/antigravity-ide"},
+            {"path": "externalTools.antigravity.appHome", "defaultSource": "~/.gemini/antigravity"},
+            {"path": "externalTools.antigravity.cliConversationsRoot", "defaultSource": "~/.gemini/antigravity-cli/conversations"},
+            {"path": "externalTools.antigravity.ideConversationsRoot", "defaultSource": "~/.gemini/antigravity-ide/conversations"},
+            {"path": "externalTools.antigravity.appConversationsRoot", "defaultSource": "~/.gemini/antigravity/conversations"},
+            {"path": "externalTools.antigravity.cliHistoryPath", "defaultSource": "~/.gemini/antigravity-cli/history.jsonl"},
+            {"path": "externalTools.antigravity.cliBrainRoot", "defaultSource": "~/.gemini/antigravity-cli/brain"},
+            {"path": "externalTools.antigravity.ideBrainRoot", "defaultSource": "~/.gemini/antigravity-ide/brain"},
+            {"path": "externalTools.antigravity.appBrainRoot", "defaultSource": "~/.gemini/antigravity/brain"},
+            {"path": "externalTools.antigravity.binaryCandidates", "defaultSource": "common user install paths"},
+            {"path": "externalTools.cursor.home", "env": "CURSOR_AGENT_HOME", "defaultSource": "~/.cursor"},
+            {"path": "externalTools.cursor.chatsRoot", "defaultSource": "~/.cursor/chats"},
+            {"path": "externalTools.cursor.projectsRoot", "defaultSource": "~/.cursor/projects"},
+            {"path": "externalTools.cursor.acpSessionsRoot", "defaultSource": "~/.cursor/acp-sessions"},
+            {"path": "externalTools.cursor.configPath", "defaultSource": "~/.cursor/cli-config.json"},
+            {"path": "externalTools.cursor.ideStateDbCandidates", "defaultSource": "Cursor IDE user-data paths"},
+            {"path": "externalTools.cursor.workspaceStorageRoots", "defaultSource": "Cursor IDE user-data paths"},
+            {"path": "externalTools.cursor.binaryCandidates", "defaultSource": "common user install paths"},
         ),
     },
 )
@@ -1642,7 +1668,7 @@ def _validate_external_tools_update(update: Any) -> None:
             raise ValueError(f"externalTools.{tool} must be an object")
         for key, value in values.items():
             field = f"externalTools.{tool}.{key}"
-            if key == "binaryCandidates":
+            if key in {"binaryCandidates", "ideStateDbCandidates", "workspaceStorageRoots"}:
                 if not isinstance(value, list) or not value:
                     raise ValueError(f"{field} must be a non-empty list")
                 for item in value:
@@ -2366,6 +2392,34 @@ def external_tool_access_summary(paths: RuntimePaths | None = None) -> dict:
         "geminiCli.chatsRoot": _path_check(_get_nested(resolved, "geminiCli.chatsRoot"), patterns=["session-*"]),
         "geminiCli.projectsPath": _path_check(_get_nested(resolved, "geminiCli.projectsPath")),
         "hermes.stateDbPath": _path_check(_get_nested(resolved, "hermes.stateDbPath")),
+        "opencode.databasePath": _path_check(_get_nested(resolved, "opencode.databasePath")),
+        "opencode.storageRoot": _path_check(
+            _get_nested(resolved, "opencode.storageRoot"),
+            recursive_patterns=["session/*.json", "message/*.json", "part/*.json"],
+        ),
+        "antigravity.cliConversationsRoot": _path_check(
+            _get_nested(resolved, "antigravity.cliConversationsRoot"),
+            recursive_patterns=["*.pb", "*.db"],
+        ),
+        "antigravity.ideConversationsRoot": _path_check(
+            _get_nested(resolved, "antigravity.ideConversationsRoot"),
+            recursive_patterns=["*.pb", "*.db"],
+        ),
+        "antigravity.appConversationsRoot": _path_check(
+            _get_nested(resolved, "antigravity.appConversationsRoot"),
+            recursive_patterns=["*.pb", "*.db"],
+        ),
+        "cursor.chatsRoot": _path_check(
+            _get_nested(resolved, "cursor.chatsRoot"),
+            recursive_patterns=["store.db"],
+        ),
+        "cursor.projectsRoot": _path_check(
+            _get_nested(resolved, "cursor.projectsRoot"),
+            recursive_patterns=["*.jsonl", "*.txt"],
+        ),
+        "cursor.ideStateDbCandidates": _path_list_check(
+            _get_nested(resolved, "cursor.ideStateDbCandidates"),
+        ),
     }
     return {"tools": resolved, "checks": checks}
 
@@ -2774,6 +2828,18 @@ def _path_check(value: Any, *, patterns: list[str] | None = None, recursive_patt
     except OSError:
         readable = False
     return {"path": str(value), "exists": exists, "readable": readable, "sampleCount": sample_count}
+
+
+def _path_list_check(value: Any) -> dict:
+    paths = value if isinstance(value, list) else []
+    checks = [_path_check(path) for path in paths]
+    return {
+        "path": str(paths[0]) if paths else "",
+        "paths": [item["path"] for item in checks],
+        "exists": any(item["exists"] for item in checks),
+        "readable": any(item["readable"] for item in checks),
+        "sampleCount": sum(int(item["sampleCount"]) for item in checks),
+    }
 
 
 def runtime_environment_overrides(paths: RuntimePaths | None = None) -> dict[str, str]:

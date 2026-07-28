@@ -156,6 +156,11 @@ class DashboardAiAssetsStateTests(unittest.TestCase):
             with (
                 patch.object(ai_assets, "load_paths", return_value=paths),
                 patch.object(ai_assets, "_workspace_dir", return_value=Path(tmp)),
+                patch.object(
+                    ai_assets,
+                    "_current_external_tool_detection",
+                    return_value={"detectedToolKeys": ["codex"]},
+                ),
                 patch("data_foundation.snapshots.read_dashboard_snapshot", return_value=self._snapshot(payload)),
             ):
                 result = ai_assets._get_ai_assets_foundation()
@@ -175,6 +180,86 @@ class DashboardAiAssetsStateTests(unittest.TestCase):
         self.assertEqual(result["totalTokens"], 42)
         self.assertEqual(result["activeDayCount"], 17)
         self.assertTrue(result["degraded"])
+
+    def test_snapshot_reader_uses_current_detection_to_remove_stale_runtime_cards(self):
+        stale_presence = {
+            "detectedToolKeys": ["codex", "cursor"],
+            "toolPresence": {
+                "codex": {"id": "codex", "detected": True},
+                "cursor": {"id": "cursor", "detected": True},
+            },
+        }
+        current_presence = {
+            "detectedToolKeys": ["codex"],
+            "toolPresence": {
+                "codex": {"id": "codex", "detected": True},
+                "cursor": {"id": "cursor", "detected": False},
+            },
+        }
+        payload = {
+            **stale_presence,
+            "tools": [
+                {
+                    "name": "Codex",
+                    "allTimeTokens": 12,
+                    "allTimeMessages": 2,
+                    "sessionCount": 1,
+                },
+                {
+                    "name": "Cursor",
+                    "allTimeTokens": 0,
+                    "allTimeMessages": 4,
+                    "sessionCount": 2,
+                    "usageStatus": "unavailable",
+                },
+            ],
+            "agents": [
+                {"name": "Codex", "source": "Codex"},
+                {"name": "Cursor", "source": "Cursor"},
+            ],
+            "agentCount": 2,
+            "agentTree": [{"name": "Codex"}, {"name": "Cursor"}],
+            "storage": {
+                "tools": [{"name": "Codex"}, {"name": "Cursor"}],
+                "categories": [],
+            },
+            "skills": {
+                "byTool": {"Codex": [], "Cursor": []},
+                "total": 0,
+            },
+            "toolConfigs": [{"name": "Codex"}, {"name": "Cursor"}],
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = self._paths(Path(tmp))
+            with (
+                patch.object(ai_assets, "load_paths", return_value=paths),
+                patch.object(ai_assets, "_workspace_dir", return_value=Path(tmp)),
+                patch.object(
+                    ai_assets,
+                    "_current_external_tool_detection",
+                    return_value=current_presence,
+                ),
+                patch(
+                    "data_foundation.snapshots.read_dashboard_snapshot",
+                    return_value=self._snapshot(payload),
+                ),
+            ):
+                result = ai_assets._get_ai_assets_foundation()
+
+        self.assertEqual(result["detectedToolKeys"], ["codex"])
+        self.assertFalse(result["toolPresence"]["cursor"]["detected"])
+        for field in ("tools", "agents", "agentTree", "toolConfigs"):
+            self.assertEqual([item["name"] for item in result[field]], ["Codex"])
+        self.assertEqual(
+            [item["name"] for item in result["storage"]["tools"]],
+            ["Codex"],
+        )
+        self.assertEqual(list(result["skills"]["byTool"]), ["Codex"])
+        self.assertEqual(result["agentCount"], 1)
+        self.assertEqual(result["totalTokens"], 12)
+        self.assertEqual(result["totalMessages"], 2)
+        self.assertEqual(result["totalSessions"], 1)
 
     def test_error_result_is_not_cached_and_next_success_is_cached(self):
         failed = ai_assets._ai_assets_snapshot_failure()
@@ -355,6 +440,13 @@ class DashboardAiAssetsStateTests(unittest.TestCase):
                 stack.enter_context(patch.object(ai_assets, "_get_30day_trend", return_value=[]))
                 stack.enter_context(patch.object(ai_assets, "_aggregate_by_model", return_value=[]))
                 stack.enter_context(patch.object(ai_assets, "_get_agent_tree", return_value={}))
+                stack.enter_context(
+                    patch.object(
+                        ai_assets,
+                        "_current_external_tool_detection",
+                        return_value={"detectedToolKeys": ["claudeCode"]},
+                    )
+                )
                 payload = ai_assets.get_ai_assets_incremental(include_rag=False)
 
             claude = next(tool for tool in payload["tools"] if tool["name"] == "Claude Code")
@@ -375,6 +467,11 @@ class DashboardAiAssetsStateTests(unittest.TestCase):
             with (
                 patch.object(ai_assets, "load_paths", return_value=paths),
                 patch.object(ai_assets, "_workspace_dir", return_value=root),
+                patch.object(
+                    ai_assets,
+                    "_current_external_tool_detection",
+                    return_value={"detectedToolKeys": ["claudeCode"]},
+                ),
             ):
                 result = ai_assets._get_ai_assets_foundation()
 

@@ -20,6 +20,7 @@ from typing import Any
 from collections import defaultdict
 from data_foundation.paths import load_paths
 from data_foundation.diary_paths import iter_diary_markdown_files
+from data_foundation.external_tool_catalog import detect_external_tools
 from data_foundation.settings import (
     default_external_tool_settings,
     external_tool_path,
@@ -30,6 +31,12 @@ from data_foundation.settings import (
 from data_foundation.time import resolve_timezone
 from data_foundation.network import host_for_url
 from data_foundation.token_semantics import normalize_cached_input_detail
+from data_foundation.snapshots import apply_external_tool_visibility
+from data_foundation.runtime_sources import (
+    AntigravityRuntime,
+    CursorRuntime,
+    OpenCodeRuntime,
+)
 from data_foundation.usage_attribution import (
     CONTAINER_WORKSPACE_NAMES,
     TOOL_EMOJI,
@@ -56,6 +63,8 @@ logger = logging.getLogger("dashboard.ai_assets")
 _cache: dict = {"data": None, "ts": 0}
 CACHE_TTL = 30
 AI_ASSETS_CONTAINER_WORKSPACE_NAMES = CONTAINER_WORKSPACE_NAMES
+_RUNTIME_SESSION_RECORDS: dict[str, tuple] = {}
+_RUNTIME_DIALOGUE_ACTIVITY: dict[str, tuple[tuple[str, datetime | None], ...]] = {}
 
 # ── 工具定义 ──
 TOOL_DEFS = [
@@ -64,6 +73,9 @@ TOOL_DEFS = [
     {"name": "Gemini CLI", "emoji": TOOL_EMOJI["Gemini CLI"]},
     {"name": "Codex", "emoji": TOOL_EMOJI["Codex"]},
     {"name": "Hermes", "emoji": TOOL_EMOJI["Hermes"]},
+    {"name": "OpenCode", "emoji": TOOL_EMOJI["OpenCode"], "usageStatus": "available"},
+    {"name": "Antigravity", "emoji": TOOL_EMOJI["Antigravity"], "usageStatus": "local-partial"},
+    {"name": "Cursor", "emoji": TOOL_EMOJI["Cursor"], "usageStatus": "unavailable"},
 ]
 
 # ── 基础路径 ──
@@ -164,12 +176,24 @@ def _ai_assets_cache_key(source: str) -> dict[str, Any]:
         "runtimeMtime": _mtime_or_zero(runtime_path),
     }
 
+
+def _current_external_tool_detection() -> dict[str, Any]:
+    try:
+        return detect_external_tools(load_paths())
+    except Exception as error:
+        logger.warning("AI Assets external tool detection failed: %s", error)
+        return {"detectedToolKeys": [], "toolPresence": {}}
+
+
 def _tool_homes_by_name() -> dict[str, Path]:
     return {
         "Claude Code": _external_tool_path("claudeCode", "home"),
         "Gemini CLI": _external_tool_path("geminiCli", "home"),
         "Codex": _external_tool_path("codex", "home"),
         "Hermes": _external_tool_path("hermes", "home"),
+        "OpenCode": _external_tool_path("opencode", "home"),
+        "Antigravity": _external_tool_path("antigravity", "home"),
+        "Cursor": _external_tool_path("cursor", "home"),
     }
 
 def _tool_key_files_by_name() -> dict[str, list[tuple[str, Path]]]:
@@ -491,12 +515,86 @@ def _scan_all_hermes():
         conn.close()
     return entries, session_count
 
+
+def _scan_all_opencode():
+    return _scan_all_normalized_runtime(
+        "OpenCode",
+        OpenCodeRuntime(_external_tool_path("opencode", "home")),
+    )
+
+
+def _scan_all_antigravity():
+    return _scan_all_normalized_runtime(
+        "Antigravity",
+        AntigravityRuntime(
+            {
+                "cli": _external_tool_path("antigravity", "cliHome"),
+                "ide": _external_tool_path("antigravity", "ideHome"),
+                "app": _external_tool_path("antigravity", "appHome"),
+            }
+        ),
+    )
+
+
+def _scan_all_cursor():
+    return _scan_all_normalized_runtime(
+        "Cursor",
+        CursorRuntime(
+            _external_tool_path("cursor", "home"),
+            ide_state_dbs=_external_tool_list("cursor", "ideStateDbCandidates"),
+            workspace_storage_roots=_external_tool_list("cursor", "workspaceStorageRoots"),
+        ),
+    )
+
+
+def _scan_all_normalized_runtime(name: str, runtime) -> tuple[list[dict], int]:
+    sessions = tuple(runtime.sessions())
+    _RUNTIME_SESSION_RECORDS[name] = sessions
+    _RUNTIME_DIALOGUE_ACTIVITY[name] = tuple(
+        (record.external_session_key, record.occurred_at)
+        for record in runtime.dialogue()
+    )
+    sessions_by_key = {record.external_session_key: record for record in sessions}
+    entries = []
+    for record in runtime.usage():
+        session = sessions_by_key.get(record.external_session_key)
+        cwd = session.initial_cwd if session is not None else None
+        resolved = resolve_usage_group(
+            runtime.tool_key,
+            cwd=cwd,
+            initial_cwd=cwd,
+            metadata=record.metadata,
+            fallback="",
+        )
+        entries.append(
+            {
+                "input": int(record.input_tokens or 0),
+                "output": int(record.output_tokens or 0),
+                "cacheRead": int(record.cache_read_tokens or 0),
+                "cacheWrite": int(record.cache_write_tokens or 0),
+                "reasoning": int(record.reasoning_tokens or 0),
+                "toolTokens": int(record.tool_tokens or 0),
+                "protocolTotal": record.protocol_total_tokens,
+                "timestamp": record.occurred_at.isoformat(),
+                "message_count": int(record.message_count or 1),
+                "model": record.model_key or (session.model_key if session else None) or "",
+                "usageGroup": resolved.group,
+                "usageGroupSource": resolved.source,
+                "usageGroupConfidence": resolved.confidence,
+                "sourceVariant": record.source_variant,
+            }
+        )
+    return entries, len(sessions)
+
 _ALL_SCANNERS = [
     ("OpenClaw", _scan_all_openclaw),
     ("Claude Code", _scan_all_claude),
     ("Gemini CLI", _scan_all_gemini),
     ("Codex", _scan_all_codex),
-    ("Hermes", _scan_all_hermes)
+    ("Hermes", _scan_all_hermes),
+    ("OpenCode", _scan_all_opencode),
+    ("Antigravity", _scan_all_antigravity),
+    ("Cursor", _scan_all_cursor),
 ]
 
 AI_ASSET_USAGE_PARSER_VERSION = "ai-assets-usage-cache-v9"
@@ -1007,7 +1105,7 @@ def _aggregate_tool(name: str, entries: list[dict], session_count: int) -> dict:
 
     for e in entries:
         # v5.9.3 协议：Total 不含 cacheWrite
-        t = (e.get("input") or 0) + (e.get("output") or 0) + (e.get("cacheRead") or 0)
+        t = _entry_total_tokens(e)
         total_tokens += t
         mc = e.get("message_count", 1) or 1
         messages += mc
@@ -1018,6 +1116,25 @@ def _aggregate_tool(name: str, entries: list[dict], session_count: int) -> dict:
                 if ds == today_str: today_tokens += t; today_messages += mc
             except: pass
 
+    for session in _RUNTIME_SESSION_RECORDS.get(name, ()):
+        for occurred_at in (session.started_at, session.last_active_at):
+            if occurred_at is None:
+                continue
+            dt = occurred_at.astimezone(_local_tz())
+            active_dates.add(dt.strftime("%Y-%m-%d"))
+            timestamps.append(dt)
+
+    if td.get("usageStatus") == "unavailable":
+        dialogue_activity = _RUNTIME_DIALOGUE_ACTIVITY.get(name, ())
+        messages = len(dialogue_activity)
+        today_messages = 0
+        for _session_key, occurred_at in dialogue_activity:
+            if occurred_at is None:
+                continue
+            dt = occurred_at.astimezone(_local_tz())
+            if dt.strftime("%Y-%m-%d") == today_str:
+                today_messages += 1
+
     timestamps.sort()
     return {
         "name": name, "emoji": td.get("emoji", ""),
@@ -1026,7 +1143,8 @@ def _aggregate_tool(name: str, entries: list[dict], session_count: int) -> dict:
         "sessionCount": session_count,
         "firstActivity": timestamps[0].strftime("%Y-%m-%d") if timestamps else "",
         "lastActivity": timestamps[-1].strftime("%Y-%m-%d") if timestamps else "",
-        "activeDays": len(active_dates)
+        "activeDays": len(active_dates),
+        "usageStatus": td.get("usageStatus", "available"),
     }
 
 def _model_name(value: object) -> str:
@@ -1857,8 +1975,26 @@ def _get_detailed_storage(*, include_rag: bool = True) -> dict:
         ("Gemini CLI", TOOL_EMOJI["Gemini CLI"], _external_tool_path("geminiCli", "home")),
         ("Codex", TOOL_EMOJI["Codex"], _external_tool_path("codex", "home")),
         ("Hermes", TOOL_EMOJI["Hermes"], _external_tool_path("hermes", "home")),
+        ("OpenCode", TOOL_EMOJI["OpenCode"], _external_tool_path("opencode", "home")),
+        ("Cursor", TOOL_EMOJI["Cursor"], _external_tool_path("cursor", "home")),
     ]
     tools = [{"name": n, "emoji": e, "sizeMB": round(_dir_size_mb(p), 1)} for n, e, p in tool_dirs]
+    tools.append(
+        {
+            "name": "Antigravity",
+            "emoji": TOOL_EMOJI["Antigravity"],
+            "sizeMB": round(
+                _sum_size_mb(
+                    [
+                        _external_tool_path("antigravity", "cliHome"),
+                        _external_tool_path("antigravity", "ideHome"),
+                        _external_tool_path("antigravity", "appHome"),
+                    ]
+                ),
+                1,
+            ),
+        }
+    )
     paths = None
     try:
         paths = load_paths()
@@ -1958,7 +2094,7 @@ def _get_30day_trend(all_entries: dict) -> list[dict]:
                 else:
                     ds = dt.strftime("%Y-%m-%d")
                 if ds in grid:
-                    t = (e.get("input") or 0) + (e.get("output") or 0) + (e.get("cacheRead") or 0)
+                    t = _entry_total_tokens(e)
                     grid[ds][slot] += t
             except: pass
     return [{"date": d, "slots": {s: grid[d][s] for s in _TIME_SLOTS}} for d in sorted_days]
@@ -1970,7 +2106,7 @@ def _aggregate_by_model(all_entries: dict) -> list[dict]:
         session_models = defaultdict(set)
         for e in entries:
             m = e.get("model", "") or "unknown"
-            t = (e.get("input") or 0) + (e.get("output") or 0) + (e.get("cacheRead") or 0)
+            t = _entry_total_tokens(e)
             mc = e.get("message_count", 1) or 1
             model_map[m]["tokens"] += t
             model_map[m]["messages"] += mc
@@ -1995,7 +2131,7 @@ def _aggregate_by_workspace(all_entries: dict) -> list[dict]:
         for entry in entries:
             group = canonical_workspace_name(entry.get("usageGroup") or tool_name)
             key = (tool_name, group)
-            usage[key]["tokens"] += (entry.get("input") or 0) + (entry.get("output") or 0) + (entry.get("cacheRead") or 0)
+            usage[key]["tokens"] += _entry_total_tokens(entry)
             usage[key]["messages"] += entry.get("message_count", 1) or 1
     result = [
         {
@@ -2013,6 +2149,12 @@ def _aggregate_by_workspace(all_entries: dict) -> list[dict]:
 
 
 def _entry_total_tokens(entry: dict) -> int:
+    explicit = entry.get("protocolTotal")
+    if explicit is not None:
+        try:
+            return max(0, int(explicit))
+        except (TypeError, ValueError, OverflowError):
+            pass
     return int((entry.get("input") or 0) + (entry.get("output") or 0) + (entry.get("cacheRead") or 0))
 
 
@@ -2523,12 +2665,74 @@ def _get_agent_tree(tools_stats: list[dict], all_entries: dict[str, list[dict]] 
             "workspace": str(hermes_home), "keyFiles": global_files,
         }]
 
+    def _normalized_runtime_items(tname, ts):
+        sessions = _RUNTIME_SESSION_RECORDS.get(tname, ())
+        dialogue_counts = defaultdict(int)
+        for session_key, _occurred_at in _RUNTIME_DIALOGUE_ACTIVITY.get(tname, ()):
+            dialogue_counts[session_key] += 1
+        grouped = defaultdict(list)
+        for session in sessions:
+            grouped[session.initial_cwd or "__local__"].append(session)
+        items = []
+        for workspace, records in sorted(grouped.items(), key=lambda item: item[0]):
+            activity_times = [
+                record.last_active_at or record.started_at
+                for record in records
+                if record.last_active_at is not None or record.started_at is not None
+            ]
+            last_active = max(activity_times, default=None)
+            models = [
+                record.model_key
+                for record in sorted(
+                    records,
+                    key=lambda record: record.last_active_at or record.started_at or datetime.min.replace(tzinfo=timezone.utc),
+                    reverse=True,
+                )
+                if record.model_key
+            ]
+            variants = sorted({record.source_variant for record in records if record.source_variant})
+            display_name = (
+                _workspace_display_name(Path(workspace))
+                if workspace != "__local__"
+                else "Local sessions"
+            )
+            items.append(
+                {
+                    "name": display_name,
+                    "displayName": display_name,
+                    "level": "workspace" if workspace != "__local__" else "session",
+                    "model": models[0] if models else latest_models.get(tname, {}).get("__tool__", ""),
+                    "sessions": len(records),
+                    "messages": sum(
+                        dialogue_counts.get(record.external_session_key, 0)
+                        for record in records
+                    ),
+                    "lastActive": (
+                        last_active.astimezone(_local_tz()).strftime("%Y-%m-%d %H:%M")
+                        if last_active is not None
+                        else "unknown"
+                    ),
+                    "workspace": (
+                        workspace
+                        if workspace != "__local__"
+                        else str(_tool_homes_by_name().get(tname, ""))
+                    ),
+                    "keyFiles": [],
+                    "sourceVariants": variants,
+                    "usageStatus": ts.get("usageStatus", "available"),
+                }
+            )
+        return items
+
     # Build tree for non-OpenClaw tools
     tool_builders = {
         "Claude Code": _claude_code_items,
         "Gemini CLI": _gemini_cli_items,
         "Codex": _codex_items,
         "Hermes": _hermes_items,
+        "OpenCode": lambda ts: _normalized_runtime_items("OpenCode", ts),
+        "Antigravity": lambda ts: _normalized_runtime_items("Antigravity", ts),
+        "Cursor": lambda ts: _normalized_runtime_items("Cursor", ts),
     }
     for tname, builder in tool_builders.items():
         ts = next((t for t in tools_stats if t["name"] == tname), {})
@@ -2540,6 +2744,9 @@ def _get_agent_tree(tools_stats: list[dict], all_entries: dict[str, list[dict]] 
         elif tname == "Hermes":
             card_count = len(items)
             count_label = "agents"
+        elif tname in {"OpenCode", "Antigravity", "Cursor"}:
+            card_count = ts.get("sessionCount", 0)
+            count_label = "sessions"
         else:
             card_count = ts.get("sessionCount", 0)
             count_label = "sessions"
@@ -2583,6 +2790,8 @@ def _tool_version(executable: str | None) -> str:
 
 
 def _find_tool_executable(binary: str, explicit_paths: list[Path] | None = None) -> str | None:
+    if not binary:
+        return None
     candidates = [Path(path) for path in (explicit_paths or [])]
     candidates.extend(sorted((HOME / ".nvm" / "versions" / "node").glob(f"*/bin/{binary}"), reverse=True))
     resolved = shutil.which(binary)
@@ -2600,6 +2809,9 @@ def discover_tool_configs(*, persist: bool = True) -> list[dict]:
         ("Codex", TOOL_EMOJI["Codex"], _external_tool_path("codex", "home"), _external_tool_path("codex", "configPath"), "codex", [], []),
         ("Gemini CLI", TOOL_EMOJI["Gemini CLI"], _external_tool_path("geminiCli", "home"), _external_tool_path("geminiCli", "configPath"), "gemini", [], []),
         ("Hermes", TOOL_EMOJI["Hermes"], _external_tool_path("hermes", "home"), _external_tool_path("hermes", "configPath"), "hermes", _external_tool_list("hermes", "binaryCandidates"), []),
+        ("OpenCode", TOOL_EMOJI["OpenCode"], _external_tool_path("opencode", "home"), _external_tool_path("opencode", "configPath"), "", [], []),
+        ("Antigravity", TOOL_EMOJI["Antigravity"], _external_tool_path("antigravity", "home"), _external_tool_path("antigravity", "cliHome"), "", [], []),
+        ("Cursor", TOOL_EMOJI["Cursor"], _external_tool_path("cursor", "home"), _external_tool_path("cursor", "configPath"), "", [], []),
     ]
     checked_at = _now_local().strftime("%Y-%m-%d %H:%M:%S")
     configs = []
@@ -2656,16 +2868,28 @@ def _foundation_active_day_count() -> int:
 
 
 def refresh_tool_configs() -> list[dict]:
-    configs = discover_tool_configs()
-    _cache["data"] = None
-    _cache["ts"] = 0
+    configs, _detection = _refresh_tool_configs_with_detection()
     return configs
 
 
+def _refresh_tool_configs_with_detection() -> tuple[list[dict], dict[str, Any]]:
+    configs = discover_tool_configs()
+    detection = _current_external_tool_detection()
+    visible = apply_external_tool_visibility(
+        {"toolConfigs": configs},
+        detection,
+    ).get("toolConfigs", [])
+    _cache["data"] = None
+    _cache["ts"] = 0
+    return visible, detection
+
+
 def refresh_tool_configs_with_metadata() -> dict:
-    configs = refresh_tool_configs()
+    configs, detection = _refresh_tool_configs_with_detection()
     return {
         "toolConfigs": configs,
+        "detectedToolKeys": detection.get("detectedToolKeys", []),
+        "toolPresence": detection.get("toolPresence", {}),
         "sideEffects": ["tool-config-snapshot-write", "ai-assets-cache-invalidation"],
         "snapshotPath": str(_tool_config_snapshot_path()),
     }
@@ -2678,6 +2902,7 @@ def _build_ai_assets_payload(
     *,
     include_rag: bool = True,
     usage_cache: dict | None = None,
+    tool_detection: dict[str, Any] | None = None,
 ) -> dict:
     now = _now_local()
     tools = []
@@ -2696,7 +2921,7 @@ def _build_ai_assets_payload(
             total_ts += session_count
         except Exception as error:
             logger.warning("Aggregate %s failed: %s", name, error)
-            tools.append({"name": name, "emoji": item.get("emoji", ""), "allTimeTokens": 0, "allTimeMessages": 0, "todayTokens": 0, "todayMessages": 0, "sessionCount": 0, "firstActivity": "", "lastActivity": "", "activeDays": 0})
+            tools.append({"name": name, "emoji": item.get("emoji", ""), "allTimeTokens": 0, "allTimeMessages": 0, "todayTokens": 0, "todayMessages": 0, "sessionCount": 0, "firstActivity": "", "lastActivity": "", "activeDays": 0, "usageStatus": item.get("usageStatus", "available")})
 
     agents = _get_agents_enhanced(tools, all_entries)
     workspace_usage = _aggregate_by_workspace(all_entries)
@@ -2724,7 +2949,10 @@ def _build_ai_assets_payload(
         data["usageCache"] = usage_cache
     if include_rag:
         data["rag"] = _get_rag_stats()
-    return data
+    return apply_external_tool_visibility(
+        data,
+        tool_detection if tool_detection is not None else _current_external_tool_detection(),
+    )
 
 
 def get_ai_assets(*, include_rag: bool = True) -> dict:
@@ -2739,6 +2967,8 @@ def get_ai_assets(*, include_rag: bool = True) -> dict:
             logger.warning(f"Scan {name} failed: {e}")
             all_entries[name] = []
             session_counts[name] = 0
+            _RUNTIME_SESSION_RECORDS.pop(name, None)
+            _RUNTIME_DIALOGUE_ACTIVITY.pop(name, None)
     return _build_ai_assets_payload(all_entries, session_counts, include_rag=include_rag)
 
 
@@ -2757,6 +2987,26 @@ def get_ai_assets_incremental(*, include_rag: bool = True) -> dict:
         except (TypeError, ValueError):
             prior_errors = 0
         usage_cache["errors"] = prior_errors + 1
+    for name, scanner_fn in (
+        ("OpenCode", _scan_all_opencode),
+        ("Antigravity", _scan_all_antigravity),
+        ("Cursor", _scan_all_cursor),
+    ):
+        try:
+            entries, session_count = scanner_fn()
+            all_entries[name] = entries
+            session_counts[name] = session_count
+        except Exception as error:
+            logger.warning("Scan %s failed: %s", name, error)
+            all_entries[name] = []
+            session_counts[name] = 0
+            _RUNTIME_SESSION_RECORDS.pop(name, None)
+            _RUNTIME_DIALOGUE_ACTIVITY.pop(name, None)
+            try:
+                prior_errors = max(0, int(usage_cache.get("errors") or 0))
+            except (TypeError, ValueError):
+                prior_errors = 0
+            usage_cache["errors"] = prior_errors + 1
     payload = _build_ai_assets_payload(
         all_entries,
         session_counts,
@@ -2842,6 +3092,13 @@ def _get_ai_assets_foundation() -> dict:
         if not isinstance(payload, dict):
             raise TypeError("AI Assets snapshot payload must be an object")
         data = dict(payload)
+        # Presence is intentionally evaluated at read time as well. A snapshot
+        # can outlive a local uninstall, so its embedded presence is audit
+        # metadata rather than authority for current runtime cards.
+        data = apply_external_tool_visibility(
+            data,
+            _current_external_tool_detection(),
+        )
         data.setdefault("rag", {})
         data.setdefault("storage", {"tools": [], "categories": []})
         data["dataFreshness"] = {

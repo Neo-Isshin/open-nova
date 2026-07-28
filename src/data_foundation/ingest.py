@@ -23,6 +23,9 @@ DISPLAY_NAMES = {
     "codex": "Codex",
     "gemini-cli": "Gemini CLI",
     "hermes": "Hermes",
+    "opencode": "OpenCode",
+    "antigravity": "Antigravity",
+    "cursor": "Cursor",
     "cron": "Cron",
 }
 
@@ -97,14 +100,31 @@ def _write_error(paths: RuntimePaths, run_id: int, tool_key: str, artifact_id: i
         )
 
 
-def _write_event(paths: RuntimePaths, event, artifact_id: int) -> None:
+def _upsert_session(paths: RuntimePaths, event, artifact_id: int) -> tuple[int, str, str | None]:
     payload = event.payload
+    metadata = dict(payload.get("metadata") or {})
+    for key in ("title", "model_key", "source_variant", "usage_status", "dialogue_status"):
+        if payload.get(key) not in (None, ""):
+            metadata[key] = payload[key]
+    if payload.get("raw_locator"):
+        metadata["raw_locator"] = payload["raw_locator"]
     occurred = event.occurred_at.isoformat()
-    day = business_date_for(event.occurred_at, paths=paths).isoformat()
-    metadata = payload.get("metadata") or {}
-    cwd = metadata.get("cwd")
-    agent_key = metadata.get("agent_key")
+    started_at = _event_timestamp(payload.get("started_at")) or occurred
+    last_active_at = _event_timestamp(payload.get("last_active_at")) or occurred
+    cwd = str(payload.get("initial_cwd") or metadata.get("cwd") or "").strip() or None
+    agent_key = str(payload.get("agent_key") or metadata.get("agent_key") or "").strip() or None
     with connect(paths) as connection:
+        existing = connection.execute(
+            "SELECT metadata_json FROM sessions WHERE tool_key = ? AND external_session_key = ?",
+            (event.tool_key, event.external_session_key),
+        ).fetchone()
+        if existing is not None:
+            try:
+                prior_metadata = json.loads(existing["metadata_json"])
+            except (TypeError, json.JSONDecodeError):
+                prior_metadata = {}
+            if isinstance(prior_metadata, dict):
+                metadata = {**prior_metadata, **metadata}
         connection.execute(
             """
             INSERT INTO sessions(
@@ -125,8 +145,8 @@ def _write_event(paths: RuntimePaths, event, artifact_id: int) -> None:
             (
                 event.tool_key,
                 event.external_session_key,
-                occurred,
-                occurred,
+                started_at,
+                last_active_at,
                 cwd,
                 agent_key,
                 json.dumps(metadata, sort_keys=True),
@@ -136,8 +156,36 @@ def _write_event(paths: RuntimePaths, event, artifact_id: int) -> None:
             "SELECT id FROM sessions WHERE tool_key = ? AND external_session_key = ?",
             (event.tool_key, event.external_session_key),
         ).fetchone()["id"]
+    return int(session_id), last_active_at, cwd
+
+
+def _write_event(paths: RuntimePaths, event, artifact_id: int) -> None:
+    payload = event.payload
+    session_id, session_last_active, cwd = _upsert_session(paths, event, artifact_id)
+    occurred = event.occurred_at.isoformat()
+    occurred_dt = event.occurred_at
+    day = business_date_for(occurred_dt, paths=paths).isoformat()
+    metadata = payload.get("metadata") or {}
+    if event.event_type == "session":
+        _write_activity_evidence(
+            paths,
+            session_id=session_id,
+            occurred_at=session_last_active,
+            business_date=day,
+            cwd=cwd,
+            artifact_id=artifact_id,
+            raw_locator=payload.get("raw_locator") or {},
+            confidence=str(payload.get("workspace_confidence") or "high"),
+        )
+        return
+    if event.event_type != "usage":
+        raise ValueError(f"unsupported normalized event type: {event.event_type}")
+    with connect(paths) as connection:
+        explicit_protocol_total = payload.get("protocol_total_tokens")
         protocol_total = (
-            payload["input_tokens"] + payload["output_tokens"] + payload["cache_read_tokens"]
+            int(explicit_protocol_total)
+            if explicit_protocol_total is not None
+            else payload["input_tokens"] + payload["output_tokens"] + payload["cache_read_tokens"]
         )
         connection.execute(
             """
@@ -182,26 +230,60 @@ def _write_event(paths: RuntimePaths, event, artifact_id: int) -> None:
                 json.dumps(metadata, sort_keys=True),
             ),
         )
-        if cwd and Path(cwd).is_absolute():
-            normalized = str(Path(cwd).expanduser().absolute())
-            connection.execute(
-                """
-                INSERT OR IGNORE INTO activity_evidence(
-                    session_id, occurred_at, business_date, evidence_type,
-                    observed_path, normalized_path, source_artifact_id,
-                    raw_locator_json, confidence
-                ) VALUES (?, ?, ?, 'cwd', ?, ?, ?, ?, 'high')
-                """,
-                (
-                    session_id,
-                    occurred,
-                    day,
-                    cwd,
-                    normalized,
-                    artifact_id,
-                    json.dumps(payload["raw_locator"], sort_keys=True),
-                ),
-            )
+    _write_activity_evidence(
+        paths,
+        session_id=session_id,
+        occurred_at=occurred,
+        business_date=day,
+        cwd=cwd,
+        artifact_id=artifact_id,
+        raw_locator=payload.get("raw_locator") or {},
+        confidence="high",
+    )
+
+
+def _write_activity_evidence(
+    paths: RuntimePaths,
+    *,
+    session_id: int,
+    occurred_at: str,
+    business_date: str,
+    cwd: str | None,
+    artifact_id: int,
+    raw_locator: dict,
+    confidence: str,
+) -> None:
+    if not cwd or not Path(cwd).is_absolute():
+        return
+    normalized = str(Path(cwd).expanduser().absolute())
+    with connect(paths) as connection:
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO activity_evidence(
+                session_id, occurred_at, business_date, evidence_type,
+                observed_path, normalized_path, source_artifact_id,
+                raw_locator_json, confidence
+            ) VALUES (?, ?, ?, 'cwd', ?, ?, ?, ?, ?)
+            """,
+            (
+                session_id,
+                occurred_at,
+                business_date,
+                cwd,
+                normalized,
+                artifact_id,
+                json.dumps(raw_locator, sort_keys=True),
+                confidence if confidence in {"high", "medium", "low", "fallback"} else "low",
+            ),
+        )
+
+
+def _event_timestamp(value: object) -> str | None:
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
 
 
 def run_shadow_ingestion(
@@ -236,7 +318,7 @@ def run_shadow_period_ingestion(
     selected_dates = set(dates)
     migrate(paths)
     seed_projects_from_registry(paths)
-    selected = tuple(adapters or default_usage_adapters())
+    selected = tuple(adapters or default_usage_adapters(paths))
     registry = ToolRegistry(paths)
     for adapter in selected:
         registry.register(
