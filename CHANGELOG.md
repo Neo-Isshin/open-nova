@@ -4,6 +4,34 @@ All notable public changes to Actanara are documented here.
 
 ## Unreleased
 
+## [1.6.0] - 2026-07-28
+
+### Added
+
+- Publish one POSIX `install.sh` entrypoint for both macOS and Linux. The
+  entrypoint detects the host platform and dispatches to the matching adapter
+  from the same immutable source commit.
+- Resolve unattended updates from the latest stable, immutable GitHub Release
+  while retaining explicit full-commit and local-source controls for advanced
+  and offline workflows.
+
+### Changed
+
+- Consolidate macOS and Linux implementation on one release line so the public
+  one-liner, source archive, Runtime payload, and update path all share an exact
+  commit identity.
+- Keep remote dry-run operations plan-only, and make repair handoff semantics
+  platform-aware without weakening pending-transaction or rollback protection.
+
+### Security and compatibility
+
+- Reject mutable network refs, credentialed or non-HTTPS release URLs,
+  ambiguous Release metadata, unsafe Git cache layouts, replacement objects,
+  hostile worktree configuration, and ambient Git execution overrides.
+- Verify the unified release gate on macOS and Debian 13, including ordinary
+  Linux user execution, x86_64/arm64 platform contracts, and local-only Agent
+  Runtime discovery.
+
 ## [1.5.0] - 2026-07-27
 
 ### Added
@@ -265,6 +293,7 @@ managed background services executing an older concrete source directory.
 - Runtime secrets remain in the Runtime-local private secret store and are
   excluded from source and release artifacts.
 
+[1.6.0]: https://github.com/Neo-Isshin/actanara/releases/tag/v1.6.0
 [1.5.0]: https://github.com/Neo-Isshin/actanara/releases/tag/v1.5.0
 [1.4.0]: https://github.com/Neo-Isshin/actanara/releases/tag/v1.4.0
 [1.3.0]: https://github.com/Neo-Isshin/actanara/releases/tag/v1.3.0
