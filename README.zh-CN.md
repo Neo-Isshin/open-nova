@@ -5,7 +5,7 @@
 <p align="center">
   <strong>Agent 完成了有价值的工作——Actanara 让这些成果不再随 Session 消失。</strong>
   <br>
-  把 Codex、Claude Code、Gemini CLI、OpenClaw 和 Hermes 的会话、任务与证据，留成你能查、能复用、能回顾的本地资产。
+  把 Codex、Claude Code、Gemini CLI、OpenClaw、Hermes、OpenCode、Antigravity 和 Cursor 的会话、任务与证据，留成你能查、能复用、能回顾的本地资产。
 </p>
 
 <p align="center">
@@ -56,7 +56,7 @@ Actanara 打通这些壁垒：让 Claude Code 完成的工作能被 Codex 找到
 - **集成由用户控制**：工具 Skill、外部 Runtime 定义和关键设置都可查看、可编辑、可审计。
 - **受保护的 Agentic RAG**：`nova-RAG` 通过查询评估、候选提升、召回校准和安全回滚管理检索质量，只向外部 Runtime 暴露受限的只读合约。
 
-> 本文中的 **Agent Runtime** 指拥有独立会话、日志、记忆和执行上下文的 AI 工具环境，例如 Codex、Claude Code、Gemini CLI、OpenClaw 和 Hermes。
+> 本文中的 **Agent Runtime** 指拥有独立会话、日志、记忆和执行上下文的 AI 工具环境，例如 Codex、Claude Code、Gemini CLI、OpenClaw、Hermes、OpenCode、Antigravity 和 Cursor。
 
 <a id="install-actanara"></a>
 ## 安装 Actanara
@@ -156,7 +156,7 @@ nova-RAG（可选）→ 外部 Runtime 只读检索
 - ⏱️ **Linux 服务**：Dashboard、调度与可选 RAG 使用用户级 systemd unit；存在控制终端时，安装器会先询问是否需要退出登录后继续运行，得到明确同意后才发起不含 `sudo` 的 linger 请求。非交互安装默认保持现状，除非明确使用 `--enable-linger` 或 `--require-linger`。
 - 🪟 **Windows**：不是受支持的一行安装目标，高级用户仍可从源码运行部分组件。
 
-**当前支持的 Agent Runtime**：🦞 OpenClaw · ✳️ Claude Code · 🤖 Codex · ✨ Gemini CLI · ⚕️ Hermes。实际可采集内容取决于本机是否存在兼容日志与对应路径是否启用；更多 Runtime 与跨平台能力属于后续版本。
+**当前支持的 Agent Runtime**：🦞 OpenClaw · ✳️ Claude Code · 🤖 Codex · ✨ Gemini CLI · ⚕️ Hermes · 🐙 OpenCode · 🛡️ Antigravity · 🖱️ Cursor。实际可采集内容取决于本机是否存在兼容记录与对应路径是否启用。Cursor 当前接入本地会话、工作区记录和明确的对话正文；Actanara 不请求 Cursor 云端 API，也不会把缺失的 Token 用量推断成 0。
 
 ## 📊 Dashboard、截图与交互 Demo
 

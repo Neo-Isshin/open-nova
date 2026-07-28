@@ -59,9 +59,11 @@ def _table_differences(legacy: dict, foundation: dict) -> dict[str, dict[str, in
     differences = {}
     for tool_key in (*DIARY_TOOL_KEYS, "total"):
         changed = {
-            field: int(foundation[tool_key].get(field, 0)) - int(legacy[tool_key].get(field, 0))
+            field: int((foundation.get(tool_key) or {}).get(field, 0))
+            - int((legacy.get(tool_key) or {}).get(field, 0))
             for field in DIARY_TABLE_FIELDS
-            if int(foundation[tool_key].get(field, 0)) != int(legacy[tool_key].get(field, 0))
+            if int((foundation.get(tool_key) or {}).get(field, 0))
+            != int((legacy.get(tool_key) or {}).get(field, 0))
         }
         if changed:
             differences[tool_key] = changed

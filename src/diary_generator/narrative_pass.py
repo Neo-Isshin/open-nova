@@ -238,8 +238,8 @@ def _calculate_stats_legacy(date_str):
 
     # 汇总 Total
     tot = defaultdict(int)
-    for source in ["openclaw", "gemini-cli", "claude-code", "hermes", "codex", "cron"]:
-        for k, v in all_stats[source].items(): tot[k] += v
+    for source in ["openclaw", "gemini-cli", "claude-code", "hermes", "codex", "opencode", "antigravity", "cron"]:
+        for k, v in (all_stats.get(source) or {}).items(): tot[k] += v
     all_stats["total"] = tot
 
     # 映射模型分布
@@ -434,7 +434,9 @@ def _get_active_rag_stats():
 def build_matrix_table(all_stats):
     rows = [("input_tokens", "input_tokens"), ("output_tokens", "output_tokens"), ("cache_read", "cache_read"), ("api_calls", "api_calls"), ("sessions_total", "sessions_total"), ("active_sessions", "active_sessions"), ("messages_count", "messages_count"), ("**total_tokens**", "total_tokens")]
     # 固定列顺序，确保日记格式稳定且包含 codex
-    srcs = ["openclaw", "gemini-cli", "claude-code", "hermes", "codex", "cron"]
+    srcs = ["openclaw", "gemini-cli", "claude-code", "hermes", "codex"]
+    srcs.extend(source for source in ("opencode", "antigravity") if source in all_stats)
+    srcs.append("cron")
     matrix_str = "## 本日统计\n| 指标 | " + " | ".join(srcs) + " | **合计** |\n| :--- | " + " | ".join([":---"] * (len(srcs) + 1)) + " |\n"
     for label, key in rows:
         row_str = f"| {label} | "
@@ -456,7 +458,7 @@ def _metric_value(stats, source, key):
 
 
 def _is_blank_diary_activity(all_stats, filtered_entries):
-    non_cron_sources = ["openclaw", "gemini-cli", "claude-code", "hermes", "codex"]
+    non_cron_sources = ["openclaw", "gemini-cli", "claude-code", "hermes", "codex", "opencode", "antigravity"]
     has_non_cron_usage = any(
         _metric_value(all_stats, source, "messages_count") > 0 or _metric_value(all_stats, source, "total_tokens") > 0
         for source in non_cron_sources
@@ -479,7 +481,10 @@ def assemble_final_markdown(date_str, llm_content, all_stats, filtered_entries):
     cron_section = render_cron_tasks_section(cron_tasks)
     if _is_blank_diary_activity(all_stats, filtered_entries):
         meta = {"date": date_str, "metrics": dict(all_stats), "agents": [], "cronTasks": cron_tasks, "modelUsage": all_stats["model_usage_list"], "activityState": "empty"}
-        for s in ["openclaw", "gemini-cli", "claude-code", "hermes", "codex", "cron"]:
+        visible_sources = ["openclaw", "gemini-cli", "claude-code", "hermes", "codex"]
+        visible_sources.extend(source for source in ("opencode", "antigravity") if source in all_stats)
+        visible_sources.append("cron")
+        for s in visible_sources:
             meta["agents"].append({"name": s, "messages": all_stats[s]["messages_count"], "tokens": all_stats[s]["total_tokens"], "active_sessions": all_stats[s].get("active_sessions", 0), "sessions_total": all_stats[s].get("sessions_total", 0)})
         meta["activityState"] = "empty"
         md = [
@@ -500,7 +505,10 @@ def assemble_final_markdown(date_str, llm_content, all_stats, filtered_entries):
     meta = {"date": date_str, "metrics": dict(all_stats), "agents": [], "lessons": get_lessons_structured(date_str), "newSkills": get_new_skills_structured(date_str), "cronTasks": cron_tasks, "topTopics": extract_top_topics(filtered_entries), "ragStats": get_rag_memory_stats(date_str)["rag"], "memoryStats": get_rag_memory_stats(date_str)["memory"], "tasks": get_task_board_snapshot(date_str), "modelUsage": all_stats["model_usage_list"]}
 
     # 元数据中的 Agents 列表也保持全量 key
-    for s in ["openclaw", "gemini-cli", "claude-code", "hermes", "codex", "cron"]:
+    visible_sources = ["openclaw", "gemini-cli", "claude-code", "hermes", "codex"]
+    visible_sources.extend(source for source in ("opencode", "antigravity") if source in all_stats)
+    visible_sources.append("cron")
+    for s in visible_sources:
         meta["agents"].append({"name": s, "messages": all_stats[s]["messages_count"], "tokens": all_stats[s]["total_tokens"], "active_sessions": all_stats[s].get("active_sessions", 0), "sessions_total": all_stats[s].get("sessions_total", 0)})
 
     md = [title, "", "## 天气", weather, "", "## 今日概要", "\n".join(sec_map["今日概要"]).strip(), "", matrix, "", "## Agent工作", "\n".join(sec_map["Agent工作"]).strip(), "", "## 重要提醒", "\n".join(sec_map["重要提醒"]).strip(), "", "## 定时任务情况", cron_section, "", "## 备注", "\n".join(sec_map["备注"]).strip() or "无", "", "```json\n" + json.dumps(meta, indent=2, ensure_ascii=False) + "\n```"]

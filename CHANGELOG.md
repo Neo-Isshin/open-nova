@@ -4,6 +4,37 @@ All notable public changes to Actanara are documented here.
 
 ## Unreleased
 
+## [1.5.0] - 2026-07-27
+
+### Added
+
+- Add read-only local Runtime discovery and normalized session ingestion for
+  OpenCode, Antigravity, and Cursor, including configured paths, XDG homes,
+  executable evidence, and Cursor IDE-only state.
+- Add OpenCode and Antigravity local usage attribution across Foundation,
+  AI Assets, Token Clock, diary metrics, and narrative inputs. Merge
+  Antigravity CLI, IDE, and app variants into one displayed tool family.
+
+### Changed
+
+- Show Dashboard Runtime cards only when the corresponding tool is detected
+  locally, while retaining complete Settings discovery/configuration surfaces
+  and historical diary/report facts.
+- Keep detected zero-usage tools visible, preserve degraded cards when a local
+  usage scanner fails, and exclude Cursor from Token Clock until reliable local
+  usage data is available.
+- Re-evaluate current tool presence when reading AI Assets snapshots so removed
+  tools do not leave stale cards, and recompute visible tool, session, message,
+  Agent, storage, skill, and configuration totals consistently.
+
+### Security and compatibility
+
+- Read supported Runtime data without modifying external tool state. Cursor
+  integration remains local-only and makes no account or usage API requests.
+- Treat a generic Gemini home as insufficient Antigravity evidence, retain
+  explicit provenance for every detection result, and fail closed when Runtime
+  presence cannot be determined.
+
 ## [1.4.0] - 2026-07-21
 
 ### Added
@@ -234,6 +265,7 @@ managed background services executing an older concrete source directory.
 - Runtime secrets remain in the Runtime-local private secret store and are
   excluded from source and release artifacts.
 
+[1.5.0]: https://github.com/Neo-Isshin/actanara/releases/tag/v1.5.0
 [1.4.0]: https://github.com/Neo-Isshin/actanara/releases/tag/v1.4.0
 [1.3.0]: https://github.com/Neo-Isshin/actanara/releases/tag/v1.3.0
 [1.2.0]: https://github.com/Neo-Isshin/actanara/releases/tag/v1.2.0

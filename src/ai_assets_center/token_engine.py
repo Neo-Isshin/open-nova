@@ -2,7 +2,7 @@
 """
 Token Engine (v4.0 - Universal Logic)
 智慧 Agent 系统的统一财务统计引擎。
-支持：OpenClaw(🦞), Gemini-CLI, Claude-Code, Codex, Hermes.
+支持：OpenClaw(🦞), Gemini-CLI, Claude-Code, Codex, Hermes, OpenCode, Antigravity.
 功能：支持指定日期追溯统计 & 历史累计统计。
 协议：v5.9.3 Master (Total = Input + Output + CacheRead)
 """
@@ -18,6 +18,7 @@ from data_foundation.session_files import is_openclaw_session_file
 from data_foundation.settings import default_external_tool_path, external_tool_path
 from data_foundation.time import business_window
 from data_foundation.token_semantics import normalize_cached_input_detail
+from data_foundation.runtime_sources import AntigravityRuntime, OpenCodeRuntime
 
 # ── 基础路径定义 ──
 HOME = Path.home()
@@ -270,7 +271,64 @@ def scan_tokens(target_date_str=None):
             conn.close()
         except: pass
 
-    # 6. OpenClaw Cron Runs
+    # 6. Normalized local runtimes
+    normalized_runtimes = (
+        (
+            "opencode",
+            OpenCodeRuntime(
+                _configured_path(
+                    "opencode",
+                    "home",
+                    default_external_tool_path("opencode", "home", HOME),
+                    default_external_tool_path("opencode", "home", HOME),
+                )
+            ),
+        ),
+        (
+            "antigravity",
+            AntigravityRuntime(
+                {
+                    variant: _configured_path(
+                        "antigravity",
+                        key,
+                        default_external_tool_path("antigravity", key, HOME),
+                        default_external_tool_path("antigravity", key, HOME),
+                    )
+                    for variant, key in (
+                        ("cli", "cliHome"),
+                        ("ide", "ideHome"),
+                        ("app", "appHome"),
+                    )
+                }
+            ),
+        ),
+    )
+    for tool_key, runtime in normalized_runtimes:
+        try:
+            for record in runtime.usage():
+                ts = record.occurred_at.timestamp()
+                if start_ts and not (start_ts <= ts < end_ts):
+                    continue
+                total = (
+                    int(record.protocol_total_tokens)
+                    if record.protocol_total_tokens is not None
+                    else int(record.input_tokens + record.output_tokens + record.cache_read_tokens)
+                )
+                stats[tool_key]["input"] += int(record.input_tokens)
+                stats[tool_key]["output"] += int(record.output_tokens)
+                stats[tool_key]["cacheRead"] += int(record.cache_read_tokens)
+                stats[tool_key]["cacheWrite"] += int(record.cache_write_tokens)
+                stats[tool_key]["total"] += total
+                stats[tool_key]["api_calls"] += int(record.message_count or 1)
+                stats[tool_key]["messages_count"] += int(record.message_count or 1)
+                active_sessions[tool_key].add(record.external_session_key)
+                model = record.model_key or "unknown"
+                model_usage[model]["calls"] += int(record.message_count or 1)
+                model_usage[model]["tokens"] += total
+        except Exception:
+            continue
+
+    # 7. OpenClaw Cron Runs
     cron_runs = _configured_path(
         "openclaw",
         "cronRunsRoot",

@@ -435,6 +435,7 @@ class DashboardAiAssetsCodexDivergenceTests(unittest.TestCase):
                 },
                 {"Codex": 1},
                 include_rag=False,
+                tool_detection={"detectedToolKeys": ["codex"]},
             )
 
         codex_agent = next(agent for agent in payload["agents"] if agent["name"] == "Codex")

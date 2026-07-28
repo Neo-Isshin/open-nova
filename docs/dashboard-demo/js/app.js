@@ -1299,7 +1299,7 @@ const OPERATOR_UI_TEXT = {
     runtimeSourcesNote: '这些值写入 settings.json 的 runtimeSources。生产 Dashboard 只允许 foundation；legacy 已退役，仅保留给专用迁移/诊断工具。',
     noExternalTools: '暂无 externalTools 设置。',
     externalToolPaths: '外部工具路径',
-    externalToolPathsNote: '这些路径写入 settings.json 的 externalTools，并影响 Dashboard 对 OpenClaw、Claude Code、Codex、Gemini CLI、Hermes 等历史/当前资料的读取。',
+    externalToolPathsNote: '这些路径写入 settings.json 的 externalTools，并影响 Dashboard 对 OpenClaw、Claude Code、Codex、Gemini CLI、Hermes、OpenCode、Antigravity、Cursor 等历史/当前资料的读取。',
     pipelineSettingsNote: '这些值会影响之后启动的 pipeline 子进程；已经运行中的 pipeline 不会被 retroactively 修改。',
     noStepTimeouts: '暂无 step timeout 配置。',
   },
@@ -1539,7 +1539,7 @@ const OPERATOR_UI_TEXT = {
     runtimeSourcesNote: 'These values are written to settings.json runtimeSources. Production Dashboard allows only foundation; legacy is retired and kept only for dedicated migration/diagnostic tools.',
     noExternalTools: 'No externalTools settings.',
     externalToolPaths: 'External Tool Paths',
-    externalToolPathsNote: 'These paths are written to settings.json externalTools and affect Dashboard reads of historical/current data for OpenClaw, Claude Code, Codex, Gemini CLI, Hermes, and related tools.',
+    externalToolPathsNote: 'These paths are written to settings.json externalTools and affect Dashboard reads of historical/current data for OpenClaw, Claude Code, Codex, Gemini CLI, Hermes, OpenCode, Antigravity, Cursor, and related tools.',
     pipelineSettingsNote: 'These values affect pipeline child processes started after this change; already-running pipelines are not modified retroactively.',
     noStepTimeouts: 'No step timeout configuration.',
   },
@@ -1638,6 +1638,8 @@ const AI_ASSETS_TEXT = {
     dayUnit: '天',
     cumulativeUsage: '累计消耗',
     todayUsage: '今日消耗',
+    localUsageUnavailable: '本地无可靠用量数据',
+    localUsagePartial: '本地可见用量可能不完整',
     allTimeTokens: 'All-Time Tokens',
     tokenUnit: 'tokens',
     servicesUnit: 'services',
@@ -1788,6 +1790,8 @@ const AI_ASSETS_TEXT = {
     dayUnit: 'days',
     cumulativeUsage: 'Cumulative Usage',
     todayUsage: 'Today Usage',
+    localUsageUnavailable: 'Reliable usage is not available locally',
+    localUsagePartial: 'Locally visible usage may be incomplete',
     allTimeTokens: 'All-Time Tokens',
     tokenUnit: 'tokens',
     servicesUnit: 'services',
@@ -4206,8 +4210,8 @@ function toggleKpiPanel(date, type) {
     const agents = agentList.slice().sort((a,b) => b.messages - a.messages || b.taskCount - a.taskCount);
     if (Object.keys(sbs).length > 0) {
       // Per-source sessions from actanara JSON block
-      const sourceLabels = {'openclaw':'OpenClaw','gemini-cli':'Gemini CLI','claude-code':'Claude Code','codex':'Codex','hermes':'Hermes','cron':'Cron'};
-      const sourceColors = {'openclaw':'#533afd','gemini-cli':'#2563eb','claude-code':'#dc2626','codex':'#10B981','hermes':'#0891b2','cron':'#6b7280'};
+      const sourceLabels = {'openclaw':'OpenClaw','gemini-cli':'Gemini CLI','claude-code':'Claude Code','codex':'Codex','hermes':'Hermes','opencode':'OpenCode','antigravity':'Antigravity','cursor':'Cursor','cron':'Cron'};
+      const sourceColors = {'openclaw':'#533afd','gemini-cli':'#2563eb','claude-code':'#dc2626','codex':'#10B981','hermes':'#0891b2','opencode':'#0EA5A4','antigravity':'#6366F1','cursor':'#7C3AED','cron':'#6b7280'};
       const sourceEntries = Object.entries(sbs).sort((a,b) => (b[1].active_sessions||0) - (a[1].active_sessions||0));
       const totalActive = sourceEntries.reduce((s,e) => s + (e[1].active_sessions||0), 0);
       const totalAll = sourceEntries.reduce((s,e) => s + (e[1].sessions_total||0), 0);
@@ -5510,7 +5514,7 @@ function renderWorkspaceAttributionSettings() {
     '<div class="settings-section">' +
       '<div class="settings-section-title">添加归属规则</div>' +
       '<div class="settings-row"><label>Rule Type</label><select id="workspaceAttributionRuleType"><option value="path">path</option><option value="alias">alias</option><option value="container">container</option></select></div>' +
-      '<div class="settings-row"><label>Tool</label><select id="workspaceAttributionTool"><option value="">all</option><option value="codex">Codex</option><option value="claude-code">Claude Code</option><option value="gemini-cli">Gemini CLI</option><option value="openclaw">OpenClaw</option></select></div>' +
+      '<div class="settings-row"><label>Tool</label><select id="workspaceAttributionTool"><option value="">all</option><option value="codex">Codex</option><option value="claude-code">Claude Code</option><option value="gemini-cli">Gemini CLI</option><option value="openclaw">OpenClaw</option><option value="opencode">OpenCode</option><option value="antigravity">Antigravity</option><option value="cursor">Cursor</option></select></div>' +
       '<div class="settings-row"><label>Workspace Path</label><input id="workspaceAttributionPath" placeholder="~/Projects/TokenClock"></div>' +
       '<div class="settings-row"><label>Workspace Name</label><input id="workspaceAttributionName" placeholder="留空则使用项目 metadata"></div>' +
       '<div class="settings-row"><label>Alias From</label><input id="workspaceAttributionAliasSource" placeholder="TokenClock-normal"></div>' +
@@ -7320,7 +7324,8 @@ function makeLineChart(id, labels, datasets) {
 /* ═══ TokenClock — 当日实时总览数据 ═══ */
 const TC_TOOL_COLORS = {
   'OpenClaw': '#FF6B35', 'Claude Code': '#D97706',
-  'Gemini CLI': '#3B82F6', 'Codex': '#10B981', 'Hermes': '#F59E0B'
+  'Gemini CLI': '#3B82F6', 'Codex': '#10B981', 'Hermes': '#F59E0B',
+  'OpenCode': '#0EA5A4', 'Antigravity': '#6366F1', 'Cursor': '#7C3AED'
 };
 
 function renderTokenClock(data) {
@@ -7618,7 +7623,7 @@ function renderHeatmap(trend30d, targetId = 'aaHeatmapWrap', showLegend = false)
 }
 
 function aaToolColor(name) {
-  const map = { 'OpenClaw':'#FF6B35','Claude Code':'#D97706','Gemini CLI':'#8B5CF6','Codex':'#10B981','Hermes':'#F59E0B' };
+  const map = { 'OpenClaw':'#FF6B35','Claude Code':'#D97706','Gemini CLI':'#8B5CF6','Codex':'#10B981','Hermes':'#F59E0B','OpenCode':'#0EA5A4','Antigravity':'#6366F1','Cursor':'#7C3AED' };
   return map[name] || '#533afd';
 }
 
@@ -8423,10 +8428,16 @@ function aaRender(d) {
   const maxTokens = Math.max(...tools.map(t => t.allTimeTokens), 1);
   el('aaTools').innerHTML = tools.map(t => {
     const pct = (t.allTimeTokens / maxTokens * 100).toFixed(1);
+    const usageUnavailable = t.usageStatus === 'unavailable';
+    const usagePartial = t.usageStatus === 'local-partial';
+    const allTimeUsage = usageUnavailable ? labels.localUsageUnavailable : aaFmtTokens(t.allTimeTokens);
+    const todayUsage = usageUnavailable ? labels.localUsageUnavailable : aaFmtTokens(t.todayTokens);
     return '<div class="aa-tool-card">' +
-        '<div class="aa-tool-header"><span class="aa-tool-name">' + t.name + '</span><span class="aa-tool-emoji">' + (t.emoji||'') + '</span></div>' +
-        '<div class="aa-tool-stat"><span>' + escapeHtml(labels.cumulativeUsage) + '</span><span class="aa-tool-stat-val">' + aaFmtTokens(t.allTimeTokens) + '</span></div>' +
-        '<div class="aa-tool-stat"><span>' + escapeHtml(labels.todayUsage) + '</span><span class="aa-tool-stat-val" style="color:var(--purple)">' + aaFmtTokens(t.todayTokens) + '</span></div>' +
+        '<div class="aa-tool-header"><span class="aa-tool-name">' + t.name + '</span>' +
+        (usagePartial ? '<span class="aa-tool-usage-note">' + escapeHtml(labels.localUsagePartial) + '</span>' : '') +
+        '<span class="aa-tool-emoji">' + (t.emoji||'') + '</span></div>' +
+        '<div class="aa-tool-stat"><span>' + escapeHtml(labels.cumulativeUsage) + '</span><span class="aa-tool-stat-val">' + escapeHtml(allTimeUsage) + '</span></div>' +
+        '<div class="aa-tool-stat"><span>' + escapeHtml(labels.todayUsage) + '</span><span class="aa-tool-stat-val" style="color:var(--purple)">' + escapeHtml(todayUsage) + '</span></div>' +
         '<div class="aa-tool-bar-track"><div class="aa-tool-bar-fill" style="width:' + pct + '%; background:' + aaToolColor(t.name) + '"></div></div>' +
         '<div class="aa-tool-dates"><span>' + escapeHtml(labels.firstActive) + (t.firstActivity||'—') + '</span><span>' + escapeHtml(labels.lastActive) + (t.lastActivity||'—') + '</span></div>' +
       '</div>';
@@ -9086,7 +9097,7 @@ function openSkillModal(tab, idx) {
 }
 
 function aaToolEmoji(name) {
-  const map = {'OpenClaw':'🦞','Claude Code':'✳️','Gemini CLI':'✨','Codex':'🤖','Hermes':'⚕️'};
+  const map = {'OpenClaw':'🦞','Claude Code':'✳️','Gemini CLI':'✨','Codex':'🤖','Hermes':'⚕️','OpenCode':'🐙','Antigravity':'🛡️','Cursor':'🖱️'};
   return map[name] || '🛠️';
 }
 

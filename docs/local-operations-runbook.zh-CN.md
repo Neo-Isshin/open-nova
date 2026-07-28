@@ -14,7 +14,7 @@
 
 README 负责解释产品和快速开始；本 Runbook 负责从安装前检查到首次配置、历史回填、日常 Pipeline、Dashboard、Nova-Task、`nova-RAG`、更新、备份和故障排查的完整操作路径。
 
-文中的 **Agent Runtime** 指拥有独立会话、日志、记忆和执行上下文的 AI 工具环境，例如 Codex、Claude Code、Gemini CLI、OpenClaw 和 Hermes。
+文中的 **Agent Runtime** 指拥有独立会话、日志、记忆和执行上下文的 AI 工具环境，例如 Codex、Claude Code、Gemini CLI、OpenClaw、Hermes、OpenCode、Antigravity 和 Cursor。
 
 ## 2. 版本与发布边界
 

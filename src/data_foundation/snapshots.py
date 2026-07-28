@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Callable
 
 from .db import connect
+from .external_tool_catalog import detect_external_tools
 from .paths import RuntimePaths
 from .time import parse_timestamp, resolve_timezone
 from .usage_attribution import TOOL_EMOJI, WORKSPACE_USAGE_MIN_TOKENS, resolve_usage_group, usage_group_display_allowed
@@ -24,8 +25,197 @@ TOOL_DISPLAY = {
     "gemini-cli": ("Gemini CLI", TOOL_EMOJI["Gemini CLI"]),
     "codex": ("Codex", TOOL_EMOJI["Codex"]),
     "hermes": ("Hermes", TOOL_EMOJI["Hermes"]),
+    "opencode": ("OpenCode", TOOL_EMOJI["OpenCode"]),
+    "antigravity": ("Antigravity", TOOL_EMOJI["Antigravity"]),
+    "cursor": ("Cursor", TOOL_EMOJI["Cursor"]),
 }
-DISPLAY_ORDER = ("openclaw", "claude-code", "gemini-cli", "codex", "hermes")
+DISPLAY_ORDER = (
+    "openclaw",
+    "claude-code",
+    "gemini-cli",
+    "codex",
+    "hermes",
+    "opencode",
+    "antigravity",
+    "cursor",
+)
+
+CATALOG_TOOL_IDS = (
+    "openclaw",
+    "claudeCode",
+    "codex",
+    "geminiCli",
+    "hermes",
+    "opencode",
+    "antigravity",
+    "cursor",
+)
+CATALOG_ID_BY_FOUNDATION_KEY = {
+    "openclaw": "openclaw",
+    "claude-code": "claudeCode",
+    "codex": "codex",
+    "gemini-cli": "geminiCli",
+    "hermes": "hermes",
+    "opencode": "opencode",
+    "antigravity": "antigravity",
+    "cursor": "cursor",
+}
+CATALOG_ID_BY_DISPLAY_NAME = {
+    TOOL_DISPLAY[foundation_key][0]: catalog_id
+    for foundation_key, catalog_id in CATALOG_ID_BY_FOUNDATION_KEY.items()
+}
+_TOOL_ID_ALIASES = {
+    **CATALOG_ID_BY_FOUNDATION_KEY,
+    **CATALOG_ID_BY_DISPLAY_NAME,
+    **{catalog_id: catalog_id for catalog_id in CATALOG_TOOL_IDS},
+}
+
+
+def apply_external_tool_visibility(
+    payload: dict,
+    detection: dict,
+) -> dict:
+    """Return an AI Assets payload containing cards for detected tools only."""
+
+    detected = _normalized_detected_tool_ids(detection)
+    detected_set = set(detected)
+    result = dict(payload)
+    presence = detection.get("toolPresence")
+    result["detectedToolKeys"] = detected
+    result["toolPresence"] = dict(presence) if isinstance(presence, dict) else {}
+
+    for field in ("tools", "agentTree"):
+        values = result.get(field)
+        if isinstance(values, list):
+            result[field] = [
+                item
+                for item in values
+                if _tool_id_for_item(item) in detected_set
+            ]
+
+    tool_configs = result.get("toolConfigs")
+    if isinstance(tool_configs, list):
+        visible_configs = []
+        for item in tool_configs:
+            tool_id = _tool_id_for_item(item)
+            if tool_id not in detected_set or not isinstance(item, dict):
+                continue
+            normalized = dict(item)
+            details = presence.get(tool_id) if isinstance(presence, dict) else None
+            normalized["status"] = (
+                str(details.get("status") or "detected")
+                if isinstance(details, dict)
+                else "detected"
+            )
+            visible_configs.append(normalized)
+        result["toolConfigs"] = visible_configs
+
+    visible_tools = result.get("tools")
+    if isinstance(visible_tools, list):
+        result["totalTokens"] = sum(
+            _nonnegative_int(item.get("allTimeTokens"))
+            for item in visible_tools
+            if isinstance(item, dict)
+        )
+        result["totalMessages"] = sum(
+            _nonnegative_int(item.get("allTimeMessages"))
+            for item in visible_tools
+            if isinstance(item, dict)
+        )
+        result["totalSessions"] = sum(
+            _nonnegative_int(item.get("sessionCount"))
+            for item in visible_tools
+            if isinstance(item, dict)
+        )
+
+    agents = result.get("agents")
+    if isinstance(agents, list):
+        result["agents"] = [
+            item
+            for item in agents
+            if _tool_id_for_agent(item) in detected_set
+        ]
+        result["agentCount"] = len(result["agents"])
+
+    storage = result.get("storage")
+    if isinstance(storage, dict):
+        filtered_storage = dict(storage)
+        storage_tools = storage.get("tools")
+        if isinstance(storage_tools, list):
+            filtered_storage["tools"] = [
+                item
+                for item in storage_tools
+                if _tool_id_for_item(item) in detected_set
+            ]
+        result["storage"] = filtered_storage
+
+    skills = result.get("skills")
+    if isinstance(skills, dict):
+        filtered_skills = dict(skills)
+        by_tool = skills.get("byTool")
+        if isinstance(by_tool, dict):
+            filtered_by_tool = {
+                name: records
+                for name, records in by_tool.items()
+                if _tool_id_from_value(name) in detected_set
+            }
+            filtered_skills["byTool"] = filtered_by_tool
+            filtered_skills["total"] = sum(
+                len(records)
+                for records in filtered_by_tool.values()
+                if isinstance(records, list)
+            )
+        result["skills"] = filtered_skills
+
+    return result
+
+
+def _normalized_detected_tool_ids(detection: dict) -> list[str]:
+    raw = detection.get("detectedToolKeys")
+    if not isinstance(raw, list):
+        raw = detection.get("detectedToolIds")
+    if not isinstance(raw, list):
+        presence = detection.get("toolPresence")
+        raw = [
+            tool_id
+            for tool_id, details in presence.items()
+            if isinstance(details, dict) and details.get("detected") is True
+        ] if isinstance(presence, dict) else []
+    selected = {
+        canonical
+        for value in raw
+        if (canonical := _tool_id_from_value(value)) is not None
+    }
+    return [tool_id for tool_id in CATALOG_TOOL_IDS if tool_id in selected]
+
+
+def _tool_id_from_value(value: object) -> str | None:
+    return _TOOL_ID_ALIASES.get(str(value or "").strip())
+
+
+def _tool_id_for_item(item: object) -> str | None:
+    if not isinstance(item, dict):
+        return None
+    for field in ("toolKey", "tool", "id", "name"):
+        if tool_id := _tool_id_from_value(item.get(field)):
+            return tool_id
+    return None
+
+
+def _tool_id_for_agent(item: object) -> str | None:
+    if not isinstance(item, dict):
+        return None
+    for field in ("source", "toolKey", "tool", "name", "displayName"):
+        if tool_id := _tool_id_from_value(item.get(field)):
+            return tool_id
+    return None
+
+
+def _nonnegative_int(value: object) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError, OverflowError):
+        return 0
 
 
 def _diary_memory_snapshot_key(business_date: date) -> str:
@@ -168,6 +358,16 @@ def materialize_ai_assets_non_rag_snapshot(
             return payload
 
     payload = builder()
+    detection = (
+        {
+            "detectedToolKeys": payload.get("detectedToolKeys"),
+            "toolPresence": payload.get("toolPresence"),
+        }
+        if isinstance(payload.get("detectedToolKeys"), list)
+        and isinstance(payload.get("toolPresence"), dict)
+        else detect_external_tools(paths)
+    )
+    payload = apply_external_tool_visibility(payload, detection)
     write_dashboard_snapshot(paths, payload, source_run_id=source_run_id)
     if business_date is not None and isinstance(payload.get("rag"), dict):
         write_rag_daily_status_snapshot(
@@ -272,6 +472,13 @@ def _foundation_ai_assets_non_rag_payload(paths: RuntimePaths) -> dict:
                 "firstActivity": "",
                 "lastActivity": str(row["latest_date"] or "") if row else "",
                 "activeDays": int(row["active_days"] or 0) if row else 0,
+                "usageStatus": (
+                    "unavailable"
+                    if key == "cursor"
+                    else "local-partial"
+                    if key == "antigravity"
+                    else "available"
+                ),
             }
         )
     models = [
@@ -304,7 +511,7 @@ def _foundation_ai_assets_non_rag_payload(paths: RuntimePaths) -> dict:
         if int(row["tokens"] or 0) > 0 or int(row["messages"] or 0) > 0
     ]
     trend30d = _trend30d_from_usage_rows(trend_rows, str(latest_usage_day or ""))
-    return {
+    payload = {
         "timestamp": generated_at.isoformat(),
         "tools": tools,
         "totalTokens": total_tokens,
@@ -333,6 +540,10 @@ def _foundation_ai_assets_non_rag_payload(paths: RuntimePaths) -> dict:
             "rag": "excluded",
         },
     }
+    return apply_external_tool_visibility(
+        payload,
+        detect_external_tools(paths),
+    )
 
 
 def _foundation_infrastructure_payload(paths: RuntimePaths) -> dict:

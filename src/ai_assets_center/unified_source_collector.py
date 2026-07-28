@@ -18,7 +18,11 @@ from pathlib import Path
 from datetime import datetime
 from data_foundation.paths import load_paths
 from data_foundation.session_files import is_openclaw_session_file
-from data_foundation.settings import default_external_tool_path, external_tool_path
+from data_foundation.settings import (
+    default_external_tool_path,
+    external_tool_path,
+    external_tool_path_list,
+)
 from data_foundation.time import business_today, business_window, parse_timestamp, resolve_timezone
 
 SOURCES = {
@@ -26,7 +30,10 @@ SOURCES = {
     "claude-code": {"tool": "claudeCode", "key": "projectsRoot", "pattern": "**/*.jsonl", "engine": "jsonl_stream"},
     "gemini-cli":  {"tool": "geminiCli", "key": "chatsRoot", "pattern": "*.json*", "engine": "jsonl_stream"},
     "hermes":      {"tool": "hermes", "key": "sessionsRoot", "pattern": "*.json*", "engine": "json_messages"},
-    "codex":       {"tool": "codex", "key": "sessionsRoot", "pattern": "rollout-*.jsonl", "engine": "jsonl_stream"}
+    "codex":       {"tool": "codex", "key": "sessionsRoot", "pattern": "rollout-*.jsonl", "engine": "jsonl_stream"},
+    "opencode":    {"engine": "runtime_records"},
+    "antigravity": {"engine": "runtime_records"},
+    "cursor":      {"engine": "runtime_records"},
 }
 def _diary_root() -> Path:
     return load_paths().diary_dir
@@ -290,6 +297,8 @@ def abstract_thought(thought_obj):
 
 def collect_engine(name, cfg, target_date):
     start_ts, duration = get_hkt_window(target_date); end_ts = start_ts + duration
+    if cfg["engine"] == "runtime_records":
+        return collect_runtime_records(name, target_date, start_ts, end_ts)
     path = source_path(cfg)
     if not path.exists(): return 0
     if cfg["engine"] == "openclaw_agents":
@@ -451,6 +460,118 @@ def collect_engine(name, cfg, target_date):
                 f1.write(json.dumps(e, ensure_ascii=False) + "\n")
                 f2.write(json.dumps({"role": e["role"], "content": e["content"], "time": e["time"]}, ensure_ascii=False) + "\n")
     return len(daily_unified)
+
+
+def collect_runtime_records(name, target_date, start_ts, end_ts):
+    """Collect narrative-safe records from normalized local runtime parsers."""
+
+    runtime = _local_runtime(name)
+    if runtime is None:
+        return 0
+    daily_unified: list[tuple[float, int, dict]] = []
+    seen_entries = set()
+    try:
+        records = runtime.dialogue()
+        for source_order, record in enumerate(records):
+            occurred_at = record.occurred_at
+            if occurred_at is None:
+                continue
+            ts = occurred_at.timestamp()
+            if not (start_ts <= ts < end_ts):
+                continue
+            role = str(record.role or "").strip().lower()
+            if role not in {"user", "assistant"}:
+                continue
+            content = strip_thinking(record.content)
+            if not content:
+                continue
+            key = (record.external_message_key, role, content)
+            if key in seen_entries:
+                continue
+            seen_entries.add(key)
+            daily_unified.append(
+                (
+                    ts,
+                    source_order,
+                    {
+                        "role": role,
+                        "content": content,
+                        "time": format_local_hhmm(ts),
+                        "agent": name,
+                        "source": name,
+                        "sourceVariant": record.source_variant,
+                        "session": record.external_session_key,
+                    },
+                )
+            )
+    except Exception:
+        return 0
+    if not daily_unified:
+        return 0
+    daily_unified.sort(key=lambda item: (item[0], item[1]))
+    diary_root = _diary_root()
+    out_dir = diary_root / "__diary_daily" / target_date / name
+    flt_dir = diary_root / "__diary_daily" / target_date / "_filtered" / name
+    out_dir.mkdir(parents=True, exist_ok=True)
+    flt_dir.mkdir(parents=True, exist_ok=True)
+    with (
+        (out_dir / "unified_daily.jsonl").open("w", encoding="utf-8") as raw_handle,
+        (flt_dir / "unified_daily.jsonl").open("w", encoding="utf-8") as filtered_handle,
+    ):
+        for _timestamp, _source_order, entry in daily_unified:
+            raw_handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            filtered_handle.write(
+                json.dumps(
+                    {
+                        "role": entry["role"],
+                        "content": entry["content"],
+                        "time": entry["time"],
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+    return len(daily_unified)
+
+
+def _local_runtime(name):
+    if name == "opencode":
+        from data_foundation.runtime_sources import OpenCodeRuntime
+
+        return OpenCodeRuntime(_configured_external_path("opencode", "home"))
+    if name == "antigravity":
+        from data_foundation.runtime_sources import AntigravityRuntime
+
+        return AntigravityRuntime(
+            {
+                "cli": _configured_external_path("antigravity", "cliHome"),
+                "ide": _configured_external_path("antigravity", "ideHome"),
+                "app": _configured_external_path("antigravity", "appHome"),
+            }
+        )
+    if name == "cursor":
+        from data_foundation.runtime_sources import CursorRuntime
+
+        return CursorRuntime(
+            _configured_external_path("cursor", "home"),
+            ide_state_dbs=_configured_external_path_list("cursor", "ideStateDbCandidates"),
+            workspace_storage_roots=_configured_external_path_list("cursor", "workspaceStorageRoots"),
+        )
+    return None
+
+
+def _configured_external_path(tool, key):
+    try:
+        return external_tool_path(tool, key)
+    except Exception:
+        return default_external_tool_path(tool, key)
+
+
+def _configured_external_path_list(tool, key):
+    try:
+        return external_tool_path_list(tool, key)
+    except Exception:
+        return []
 
 def collect_openclaw_agents(path, cfg, target_date, start_ts, end_ts):
     total = 0

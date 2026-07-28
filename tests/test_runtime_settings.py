@@ -29,11 +29,14 @@ from data_foundation.paths import runtime_paths_for_home
 from data_foundation.time import business_date_for, business_window, detect_system_timezone, resolve_timezone_name
 from data_foundation.llm_provider_catalog import auto_pipeline_gate_tokens, llm_provider_catalog, llm_provider_operations_status
 from data_foundation.adapters.usage import (
+    AntigravityAdapter,
     ClaudeCodeAdapter,
     CodexAdapter,
     CronAdapter,
+    CursorRuntimeAdapter,
     GeminiCliAdapter,
     HermesAdapter,
+    OpenCodeAdapter,
     OpenClawAdapter,
     default_usage_adapters,
 )
@@ -1517,6 +1520,17 @@ class RuntimeSettingsTests(unittest.TestCase):
                         "codex": {"sessionsRoot": str(root / "codex" / "sessions")},
                         "geminiCli": {"chatsRoot": str(root / "gemini" / "chats")},
                         "hermes": {"stateDbPath": str(root / "hermes" / "state.db")},
+                        "opencode": {"home": str(root / "opencode")},
+                        "antigravity": {
+                            "cliHome": str(root / "antigravity-cli"),
+                            "ideHome": str(root / "antigravity-ide"),
+                            "appHome": str(root / "antigravity"),
+                        },
+                        "cursor": {
+                            "home": str(root / "cursor"),
+                            "ideStateDbCandidates": [str(root / "cursor-ide" / "state.vscdb")],
+                            "workspaceStorageRoots": [str(root / "cursor-ide" / "workspaceStorage")],
+                        },
                     }
                 },
                 paths,
@@ -1530,6 +1544,20 @@ class RuntimeSettingsTests(unittest.TestCase):
         self.assertEqual(by_type[CodexAdapter].root, (root / "codex" / "sessions").absolute())
         self.assertEqual(by_type[GeminiCliAdapter].root, (root / "gemini" / "chats").absolute())
         self.assertEqual(by_type[HermesAdapter].db_path, (root / "hermes" / "state.db").absolute())
+        self.assertEqual(by_type[OpenCodeAdapter].runtime.home, (root / "opencode").absolute())
+        self.assertEqual(
+            by_type[AntigravityAdapter].runtime.variant_homes,
+            {
+                "cli": (root / "antigravity-cli").absolute(),
+                "ide": (root / "antigravity-ide").absolute(),
+                "app": (root / "antigravity").absolute(),
+            },
+        )
+        self.assertEqual(by_type[CursorRuntimeAdapter].runtime.home, (root / "cursor").absolute())
+        self.assertEqual(
+            by_type[CursorRuntimeAdapter].runtime._configured_ide_state_dbs,
+            ((root / "cursor-ide" / "state.vscdb").absolute(),),
+        )
         self.assertEqual(by_type[CronAdapter].root, (root / "openclaw" / "cron" / "runs").absolute())
 
     def test_llm_provider_resolution_ignores_process_env_when_settings_exist(self):

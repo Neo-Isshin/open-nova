@@ -2564,6 +2564,9 @@ textarea:focus-visible {
 .tc-tool-card[data-tool="Gemini CLI"]  { --tool-color: #3B82F6; }
 .tc-tool-card[data-tool="Codex"]       { --tool-color: #10B981; }
 .tc-tool-card[data-tool="Hermes"]      { --tool-color: #F59E0B; }
+.tc-tool-card[data-tool="OpenCode"]    { --tool-color: #0EA5A4; }
+.tc-tool-card[data-tool="Antigravity"] { --tool-color: #6366F1; }
+.tc-tool-card[data-tool="Cursor"]      { --tool-color: #7C3AED; }
 .tc-tool-card.active { border-color: var(--tool-color, var(--purple-light)); }
 .tc-tool-bar-fill { background: var(--tool-color, var(--purple)); }
 
@@ -2699,6 +2702,17 @@ textarea:focus-visible {
   font-weight: 600;
   color: var(--navy);
   flex: 1;
+}
+.aa-tool-usage-note {
+  max-width: 112px;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: #eef2ff;
+  color: #4f46e5;
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1.25;
+  text-align: center;
 }
 .aa-tool-emoji { font-size: 18px; }
 .aa-tool-stat {

@@ -13,6 +13,7 @@ DEFAULT_TIMEZONE = "Asia/Hong_Kong"
 DEFAULT_BUSINESS_DAY_START_HOUR = 4
 SCHEDULER_TIMEZONE_MISMATCH_ISSUE_CODE = "scheduler-timezone-mismatch"
 SCHEDULER_SYSTEM_TIMEZONE_UNKNOWN_ISSUE_CODE = "scheduler-system-timezone-unknown"
+_SYSTEM_ZONEINFO_DIRECTORY_NAMES = frozenset({"zoneinfo", "zoneinfo.default"})
 
 
 def _valid_timezone_name(value: object) -> str | None:
@@ -26,6 +27,18 @@ def _valid_timezone_name(value: object) -> str | None:
         return None
 
 
+def _timezone_name_from_zoneinfo_path(path: Path) -> str | None:
+    """Extract a validated IANA name from a resolved system zoneinfo path."""
+    parts = path.parts
+    for index in range(len(parts) - 1, -1, -1):
+        if parts[index] not in _SYSTEM_ZONEINFO_DIRECTORY_NAMES:
+            continue
+        if index + 1 >= len(parts):
+            return None
+        return _valid_timezone_name("/".join(parts[index + 1 :]))
+    return None
+
+
 def detect_system_timezone(default: str = DEFAULT_TIMEZONE) -> str:
     """Best-effort local IANA timezone detection for new runtime defaults."""
     env_tz = _valid_timezone_name(os.getenv("TZ"))
@@ -34,12 +47,9 @@ def detect_system_timezone(default: str = DEFAULT_TIMEZONE) -> str:
     try:
         localtime = Path("/etc/localtime")
         target = localtime.resolve()
-        marker = "zoneinfo/"
-        text = str(target)
-        if marker in text:
-            detected = _valid_timezone_name(text.split(marker, 1)[1])
-            if detected:
-                return detected
+        detected = _timezone_name_from_zoneinfo_path(target)
+        if detected:
+            return detected
     except Exception:
         pass
     return _valid_timezone_name(default) or DEFAULT_TIMEZONE
@@ -49,13 +59,9 @@ def detect_system_timezone_authority() -> str | None:
     """Read the host timezone authority without honoring process TZ overrides."""
     try:
         target = Path("/etc/localtime").resolve(strict=True)
-        marker = "/zoneinfo/"
-        text = str(target)
-        if marker in text:
-            return _valid_timezone_name(text.rsplit(marker, 1)[1])
+        return _timezone_name_from_zoneinfo_path(target)
     except OSError:
         return None
-    return None
 
 
 def resolve_timezone_name(
