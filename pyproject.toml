@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "actanara"
-version = "1.4.0"
+version = "1.5.0"
 description = "Actanara local diary runtime, pipeline, dashboard, nova-RAG, and task system."
 readme = "README.md"
 authors = [

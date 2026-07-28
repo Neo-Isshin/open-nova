@@ -17,7 +17,7 @@ class LicenseMetadataTests(unittest.TestCase):
     def test_pep639_metadata_declares_mit(self):
         metadata = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
 
-        self.assertEqual(metadata["project"]["version"], "1.4.0")
+        self.assertEqual(metadata["project"]["version"], "1.5.0")
         self.assertEqual(metadata["project"]["readme"], "README.md")
         self.assertEqual(
             metadata["project"]["authors"],
