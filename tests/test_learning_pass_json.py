@@ -58,7 +58,14 @@ LLM 更擅长生成自然文本和 Markdown，跨 provider 时 JSON 标点与包
 """
             with (
                 patch("diary_generator.learning_pass.call_llm", return_value=markdown),
-                patch("diary_generator.learning_pass.load_paths", return_value=type("Paths", (), {"diary_dir": diary_root})()),
+                patch(
+                    "diary_generator.learning_pass.load_paths",
+                    return_value=type(
+                        "Paths",
+                        (),
+                        {"home": home, "diary_dir": diary_root, "legacy_diary_root": None},
+                    )(),
+                ),
                 patch("diary_generator.learning_pass.config.ACTANARA_HOME", home),
             ):
                 self.assertTrue(learning_pass.process_learning("2026-05-23", "summary"))
@@ -66,7 +73,7 @@ LLM 更擅长生成自然文本和 Markdown，跨 provider 时 JSON 标点与包
             report = diary_learning_report_path(diary_root, "2026-05-23")
             self.assertTrue(report.exists())
             self.assertIn("#### 根因", report.read_text(encoding="utf-8"))
-            lessons = (diary_root / "lessons.jsonl").read_text(encoding="utf-8")
+            lessons = (home / "artifacts" / "learning" / "lessons.jsonl").read_text(encoding="utf-8")
             self.assertIn('"rootCause"', lessons)
             self.assertIn("跨 provider", lessons)
             infra = (diary_root / "infrastructure.jsonl").read_text(encoding="utf-8")
@@ -120,7 +127,14 @@ LLM 更擅长生成自然文本和 Markdown，跨 provider 时 JSON 标点与包
 """
             with (
                 patch("diary_generator.learning_pass.call_llm", side_effect=["not markdown", repaired]),
-                patch("diary_generator.learning_pass.load_paths", return_value=type("Paths", (), {"diary_dir": diary_root})()),
+                patch(
+                    "diary_generator.learning_pass.load_paths",
+                    return_value=type(
+                        "Paths",
+                        (),
+                        {"home": home, "diary_dir": diary_root, "legacy_diary_root": None},
+                    )(),
+                ),
                 patch("diary_generator.learning_pass.config.ACTANARA_HOME", home),
             ):
                 self.assertTrue(learning_pass.process_learning("2026-05-23", "summary"))

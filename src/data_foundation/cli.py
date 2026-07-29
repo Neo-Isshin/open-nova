@@ -39,6 +39,7 @@ def build_parser() -> argparse.ArgumentParser:
     search.add_argument("--project", default="", help="Search one project")
     search.add_argument("--role", default="", help="Search one assistant or role")
     search.add_argument("--source-set", action="append", default=[], help="Search one kind of memory; may be repeated")
+    search.add_argument("--caller", default="", help="Agent requesting recall, for example codex or claude-code")
     search.add_argument("--json", action="store_true", help="Print JSON for scripts and automation")
     return parser
 
@@ -70,6 +71,8 @@ def main(argv: list[str] | None = None) -> int:
                 dashboard_url=args.dashboard_url,
                 timeout_seconds=args.timeout,
                 filters=filters,
+                mode="rag",
+                caller=args.caller or None,
             )
         except Exception as exc:
             print(f"Error: {exc}", file=sys.stderr)

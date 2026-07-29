@@ -101,6 +101,7 @@ OPERATOR_SETTINGS_WRITE_ALLOWED_TOP_LEVEL = {
     "dashboard",
     "schedule",
     "features",
+    "memorySearch",
     "externalTools",
     "paths",
     "pipeline",
@@ -221,6 +222,24 @@ SETTINGS_AUTHORITY_GROUPS = (
             {"path": "pipeline.stepTimeoutSeconds", "env": "ACTANARA_PIPELINE_STEP_TIMEOUT_SECONDS", "defaultSource": "default_settings"},
             {"path": "pipeline.stepTimeouts", "defaultSource": "default_settings"},
             {"path": "pipeline.totalWatchdogSeconds", "env": "ACTANARA_PIPELINE_TOTAL_WATCHDOG_SECONDS", "defaultSource": "default_settings"},
+        ),
+    },
+    {
+        "group": "memorySearch",
+        "authority": "settings-json + memory-router",
+        "writableVia": "operator settings API and Dashboard memory controls",
+        "manualDefaultPolicy": "auto prefers configured nova-RAG and retains a local lexical fallback; allowlisted native Agent memory is enabled unless explicitly disabled",
+        "fields": (
+            {"path": "memorySearch.enabled", "defaultSource": "true"},
+            {"path": "memorySearch.backendPolicy", "defaultSource": "auto"},
+            {"path": "memorySearch.local.enabled", "defaultSource": "true"},
+            {"path": "memorySearch.local.syncAfterPipeline", "defaultSource": "true"},
+            {"path": "memorySearch.local.maxScanFiles", "defaultSource": "2000"},
+            {"path": "memorySearch.local.maxScanBytes", "defaultSource": "67108864"},
+            {"path": "memorySearch.nativeMemory.enabled", "defaultSource": "true; explicit false is preserved"},
+            {"path": "memorySearch.nativeMemory.allowInRag", "defaultSource": "true; effective only when nova-RAG is enabled"},
+            {"path": "memorySearch.nativeMemory.includeInstructions", "defaultSource": "true; allowlisted instruction Markdown only"},
+            {"path": "memorySearch.nativeMemory.tools", "defaultSource": "Codex and Claude Code enabled"},
         ),
     },
     {
@@ -509,6 +528,25 @@ def default_settings(paths: RuntimePaths | None = None) -> dict:
             },
         },
         "features": copy.deepcopy(FEATURE_DEFAULTS),
+        "memorySearch": {
+            "enabled": True,
+            "backendPolicy": "auto",
+            "local": {
+                "enabled": True,
+                "syncAfterPipeline": True,
+                "maxScanFiles": 2000,
+                "maxScanBytes": 67108864,
+            },
+            "nativeMemory": {
+                "enabled": True,
+                "allowInRag": True,
+                "includeInstructions": True,
+                "tools": {
+                    "codex": True,
+                    "claudeCode": True,
+                },
+            },
+        },
         "runtimeSources": {
             field_name: RUNTIME_SOURCE_DEFAULTS[env_name]
             for env_name, field_name in RUNTIME_SOURCE_FIELDS.items()
@@ -1081,6 +1119,7 @@ def validate_operator_settings_update(update: dict[str, Any]) -> dict[str, Any]:
     _validate_general_update(allowed.get("general"))
     _validate_dashboard_update(allowed.get("dashboard"))
     _validate_schedule_update(allowed.get("schedule"))
+    _validate_memory_search_update(allowed.get("memorySearch"))
     _validate_external_tools_update(allowed.get("externalTools"))
     _validate_paths_update(allowed.get("paths"))
     _validate_pipeline_update(allowed.get("pipeline"))
@@ -1917,6 +1956,56 @@ def _validate_external_tools_update(update: Any) -> None:
                 _validate_path_string(field, value)
 
 
+def _validate_memory_search_update(update: Any) -> None:
+    if update is None:
+        return
+    if not isinstance(update, dict):
+        raise ValueError("memorySearch settings must be an object")
+    unsupported = sorted(set(update) - {"enabled", "backendPolicy", "local", "nativeMemory"})
+    if unsupported:
+        raise ValueError("unsupported memorySearch settings: " + ", ".join(unsupported))
+    if "enabled" in update and type(update["enabled"]) is not bool:
+        raise ValueError("memorySearch.enabled must be a boolean")
+    if "backendPolicy" in update and update.get("backendPolicy") not in {"auto", "rag", "local"}:
+        raise ValueError("memorySearch.backendPolicy must be one of: auto, local, rag")
+    local = update.get("local")
+    if local is not None:
+        if not isinstance(local, dict):
+            raise ValueError("memorySearch.local must be an object")
+        unknown = sorted(set(local) - {"enabled", "syncAfterPipeline", "maxScanFiles", "maxScanBytes"})
+        if unknown:
+            raise ValueError("unsupported memorySearch.local settings: " + ", ".join(unknown))
+        for key in ("enabled", "syncAfterPipeline"):
+            if key in local and type(local[key]) is not bool:
+                raise ValueError(f"memorySearch.local.{key} must be a boolean")
+        for key in ("maxScanFiles", "maxScanBytes"):
+            if key in local:
+                _validate_positive_int(f"memorySearch.local.{key}", local[key])
+    native = update.get("nativeMemory")
+    if native is None:
+        return
+    if not isinstance(native, dict):
+        raise ValueError("memorySearch.nativeMemory must be an object")
+    unknown = sorted(set(native) - {"enabled", "allowInRag", "includeInstructions", "tools"})
+    if unknown:
+        raise ValueError("unsupported memorySearch.nativeMemory settings: " + ", ".join(unknown))
+    for key in ("enabled", "allowInRag", "includeInstructions"):
+        if key in native and type(native[key]) is not bool:
+            raise ValueError(f"memorySearch.nativeMemory.{key} must be a boolean")
+    tools = native.get("tools")
+    if tools is not None:
+        if not isinstance(tools, dict):
+            raise ValueError("memorySearch.nativeMemory.tools must be an object")
+        unknown_tools = sorted(set(tools) - {"codex", "claudeCode"})
+        if unknown_tools:
+            raise ValueError(
+                "unsupported memorySearch.nativeMemory tools: " + ", ".join(unknown_tools)
+            )
+        for tool, enabled in tools.items():
+            if type(enabled) is not bool:
+                raise ValueError(f"memorySearch.nativeMemory.tools.{tool} must be a boolean")
+
+
 def _validate_paths_update(update: Any) -> None:
     if update is None:
         return
@@ -2616,6 +2705,141 @@ def resolve_feature_flags(paths: RuntimePaths | None = None) -> dict[str, bool]:
     configured = settings.get("features") if isinstance(settings.get("features"), dict) else {}
     merged = _deep_merge(FEATURE_DEFAULTS, configured)
     return {key: _bool_setting(value, bool(FEATURE_DEFAULTS.get(key, False))) for key, value in merged.items()}
+
+
+def resolve_memory_search_settings(paths: RuntimePaths | None = None) -> dict[str, Any]:
+    """Resolve the local/search-router policy without creating index state."""
+    selected_paths = paths or load_paths()
+    defaults = default_settings(selected_paths)["memorySearch"]
+    settings = _read_settings_for_resolution(selected_paths)
+    configured = settings.get("memorySearch") if isinstance(settings.get("memorySearch"), dict) else {}
+    merged = _deep_merge(defaults, configured)
+    local = merged.get("local") if isinstance(merged.get("local"), dict) else {}
+    native = merged.get("nativeMemory") if isinstance(merged.get("nativeMemory"), dict) else {}
+    tools = native.get("tools") if isinstance(native.get("tools"), dict) else {}
+    return {
+        "enabled": _bool_setting(merged.get("enabled"), True),
+        "backendPolicy": (
+            str(merged.get("backendPolicy") or "auto")
+            if str(merged.get("backendPolicy") or "auto") in {"auto", "rag", "local"}
+            else "auto"
+        ),
+        "local": {
+            "enabled": _bool_setting(local.get("enabled"), True),
+            "syncAfterPipeline": _bool_setting(local.get("syncAfterPipeline"), True),
+            "maxScanFiles": _positive_int(local.get("maxScanFiles"), 2000),
+            "maxScanBytes": _positive_int(local.get("maxScanBytes"), 64 * 1024 * 1024),
+            "indexPath": str(selected_paths.state_dir / "cache" / "memory-search.sqlite3"),
+        },
+        "nativeMemory": {
+            "enabled": _bool_setting(native.get("enabled"), True),
+            "allowInRag": _bool_setting(native.get("allowInRag"), True),
+            "includeInstructions": _bool_setting(native.get("includeInstructions"), True),
+            "tools": {
+                "codex": _bool_setting(tools.get("codex"), True),
+                "claudeCode": _bool_setting(tools.get("claudeCode"), True),
+            },
+        },
+    }
+
+
+def native_memory_policy_profile(paths: RuntimePaths | None = None) -> dict[str, Any]:
+    """Return the complete policy that authorizes native Agent memory reads.
+
+    The profile is safe to persist in rebuildable index metadata: it contains
+    only booleans and local path identities, never memory contents. Resolved
+    identities make retargeting a configured symlink a policy change even when
+    its lexical settings path is unchanged.
+    """
+    selected_paths = paths or load_paths()
+    native = resolve_memory_search_settings(selected_paths)["nativeMemory"]
+    codex_home = external_tool_path("codex", "home", selected_paths)
+    claude_projects_root = external_tool_path(
+        "claudeCode",
+        "projectsRoot",
+        selected_paths,
+    )
+    return {
+        "schemaVersion": 2,
+        "enabled": native["enabled"],
+        "allowInRag": native["allowInRag"],
+        "includeInstructions": native["includeInstructions"],
+        "tools": {
+            "codex": native["tools"]["codex"],
+            "claudeCode": native["tools"]["claudeCode"],
+        },
+        "paths": {
+            "codexHome": str(codex_home),
+            "claudeProjectsRoot": str(claude_projects_root),
+        },
+        "pathIdentities": {
+            "codexHome": _native_memory_path_identity(
+                codex_home,
+                authorized=(
+                    native["enabled"] is True
+                    and native["tools"]["codex"] is True
+                ),
+            ),
+            "claudeProjectsRoot": _native_memory_path_identity(
+                claude_projects_root,
+                authorized=(
+                    native["enabled"] is True
+                    and native["tools"]["claudeCode"] is True
+                ),
+            ),
+        },
+    }
+
+
+def _native_memory_path_identity(
+    path: Path,
+    *,
+    authorized: bool,
+) -> dict[str, Any]:
+    configured = path.expanduser().absolute()
+    identity: dict[str, Any] = {
+        "configuredPath": str(configured),
+        "resolvedPath": None,
+        "device": None,
+        "inode": None,
+        "status": "not-authorized",
+    }
+    if not authorized:
+        return identity
+    identity["status"] = "missing"
+    try:
+        resolved = configured.resolve(strict=True)
+        path_stat = resolved.stat()
+    except (FileNotFoundError, NotADirectoryError):
+        return identity
+    except (OSError, RuntimeError):
+        return {**identity, "status": "unavailable"}
+    return {
+        **identity,
+        "resolvedPath": str(resolved),
+        "device": int(path_stat.st_dev),
+        "inode": int(path_stat.st_ino),
+        "status": "ready",
+    }
+
+
+def native_memory_policy_digest(
+    paths: RuntimePaths | None = None,
+    *,
+    profile: dict[str, Any] | None = None,
+) -> str:
+    selected_profile = (
+        profile
+        if isinstance(profile, dict)
+        else native_memory_policy_profile(paths)
+    )
+    payload = json.dumps(
+        selected_profile,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def is_nova_task_enabled(paths: RuntimePaths | None = None) -> bool:

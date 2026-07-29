@@ -45,7 +45,7 @@ Actanara breaks down those barriers: work completed in Claude Code can be found 
 
 | | Outcome |
 | :--- | :--- |
-| **Shared memory across agents** | Work completed in Claude Code can be found and reused from Codex through a restricted, read-only retrieval boundary. |
+| **Shared memory across agents** | Work completed in Claude Code can be found and reused from Codex through a restricted, read-only retrieval boundary. Search uses `nova-RAG` when it is ready and retains a local lexical fallback when it is not. |
 | **A graph of work that actually happened** | `Nova-Task` derives tasks, status, and evidence from conversations, file changes, and tool results—not just manually written tickets. |
 | **Automatic work narratives** | Daily, weekly, and monthly reports turn fragmented sessions into a durable record of progress, decisions, and lessons learned. |
 | **A local source of truth** | Sessions, usage, generated assets, and task evidence remain in user-controlled local storage with explicit integration boundaries. |
@@ -56,7 +56,7 @@ Actanara breaks down those barriers: work completed in Claude Code can be found 
 - **Local-first with explicit boundaries:** Actanara reads configured tool locations and writes to its own runtime home. It does not rewrite external-runtime history or take over runtime execution.
 - **Model-cost efficient:** Structured prompts, explicit schemas, and controlled orchestration let lightweight models produce useful output without locking the system to one provider.
 - **User-controlled integrations:** Tool skills, external-runtime definitions, and critical settings remain visible, editable, and auditable.
-- **Protected Agentic RAG:** `nova-RAG` manages retrieval quality through evaluation, candidate promotion, recall calibration, and safe rollback, while exposing only a restricted read-only contract to external runtimes.
+- **Protected retrieval:** `nova-RAG` manages semantic retrieval quality through evaluation, candidate promotion, recall calibration, and safe rollback. Without RAG, Memory Search remains available through a lower-quality local lexical index; both backends expose restricted read-only retrieval to external runtimes.
 
 > In this README, an **agent runtime** means an AI tool environment with its own sessions, logs, memory, and execution context, such as Codex, Claude Code, Gemini CLI, OpenClaw, Hermes, OpenCode, Antigravity, or Cursor.
 
@@ -186,7 +186,10 @@ Foundation Local Fact Layer
         ↓
 Base Pipeline · Nova-Task · Dashboard
         ↓
-nova-RAG (optional) → Read-only Retrieval for External Runtimes
+Memory Search → Local Lexical Index
+        └────→ nova-RAG (optional semantic backend)
+        ↓
+Read-only Retrieval for External Runtimes
 ```
 
 | System | Core responsibility |
@@ -195,6 +198,7 @@ nova-RAG (optional) → Read-only Retrieval for External Runtimes
 | **`Base Pipeline`** | Generates diaries, technical progress, learning records, and task summaries from runtime activity. |
 | **`Dashboard`** | Presents diaries, AI assets, token usage, settings, background tasks, and task boards in one place. |
 | **`Nova-Task`** | Maintains a reviewable task graph based on evidence from real work. |
+| **`Memory Search`** | Routes read-only recall to ready `nova-RAG`, or to a local SQLite FTS/bounded-scan fallback when semantic retrieval is unavailable. |
 | **`nova-RAG`** | Optional local- or cloud-embedding retrieval subsystem with a protected index lifecycle and external read-only retrieval. |
 | **Attribution Parsers** | Identify runtimes, sessions, workspaces, scheduled jobs, and execution evidence, including work launched outside project directories. |
 
@@ -212,7 +216,7 @@ nova-RAG (optional) → Read-only Retrieval for External Runtimes
 
 ## 📊 Dashboard, Screenshots, and Interactive Demo
 
-The Dashboard is Actanara's primary operating surface: daily, weekly, and monthly diaries; live overview with token usage and AI-asset metrics; Foundation operations and data repair; background tasks and messages; LLM Provider and scheduling settings; the Nova-Task board with evidence review; and, when RAG is enabled, semantic search and retrieval-quality views.
+The Dashboard is Actanara's primary operating surface: daily, weekly, and monthly diaries; live overview with token usage and AI-asset metrics; Foundation operations and data repair; background tasks and messages; LLM Provider and scheduling settings; Memory Search status; the Nova-Task board with evidence review; and, when RAG is enabled, semantic search and retrieval-quality views.
 
 ### 🖼️ Real Dashboard Screenshots
 
@@ -284,8 +288,17 @@ The [Dashboard Static Demo](https://neo-isshin.github.io/actanara/dashboard-demo
 ### Common Commands
 
 ```bash
-# Search local memory through nova-RAG (automation consuming JSON should check the available field)
+# Search memory automatically: ready nova-RAG first, then the local lexical fallback
 actanara search "deployment issue" --top-k 5
+
+# Require one backend
+actanara search "deployment issue" --mode rag --json
+actanara search "deployment issue" --mode local --json
+
+# Inspect or refresh the disposable local search index
+actanara memory status
+actanara memory sync
+actanara memory rebuild
 
 # Run the daily Pipeline manually (defaults to the previous calendar day; --force regenerates)
 actanara pipeline
@@ -316,9 +329,19 @@ operator-owned unit.
 
 In automatic-maintenance mode, `Nova-Task` can detect hierarchy, update status, attach subtasks, and refine the task tree: high-impact top-level nodes retain human review, while routine updates proceed under configured rules, and a person can take over at any time. After an RFC, PRD, or Roadmap is imported, Actanara can also ask an LLM to decompose it into an iterative task tree. See [Nova-Task Work-Graph Reconciliation](docs/nova-task-work-graph-reconciliation.md).
 
+## 🔎 Memory Search: Useful Even Without RAG
+
+`actanara search` defaults to `--mode auto`. It uses `nova-RAG` when the semantic service is enabled and available; otherwise it falls back to an incremental local SQLite full-text index, with a bounded scan as a last-resort local path. The fallback is lexical, not semantic: exact names, IDs, dates, error text, and file names work best, while paraphrases can be missed. Use `--mode rag` to require Agentic RAG, `--mode local` to require local retrieval, or the legacy `actanara rag search-memory` command for strict RAG compatibility.
+
+The installer manages one dynamic, read-only Memory Search Skill rather than separate RAG and non-RAG skills. Choosing **Not Now** for RAG does not prevent registration: a Skill is written only for tools in the intersection of detected, explicitly selected, and currently supported Skill targets. The same Skill inspects each response's `backend` metadata and follows either the semantic or lexical protocol.
+
+Importing Codex and Claude Code's own managed memory is enabled by default for new runtimes, including allowlisted instruction files and `nova-RAG` ingestion when RAG is enabled. Each scope remains independently configurable, and an explicit `false` in an existing Runtime is preserved during upgrades. The adapter reads only allowlisted Markdown memory surfaces and does not inspect Cursor's private SQLite databases.
+
+The generic external contract at `/api/memory/external/*` is read-only and loopback-only. For commands, configuration examples, response semantics, native-memory boundaries, and troubleshooting, see [Memory Search and Local Recall](docs/memory-search.md).
+
 ## 🤖 nova-RAG: Shared Memory with a Read-Only Boundary
 
-`nova-RAG` is Actanara's optional retrieval subsystem with local or cloud embeddings. It gives external agent runtimes **read-only** access to your work memory—they can retrieve it, but cannot write memory, change the index, alter settings, or control the service lifecycle.
+`nova-RAG` is Actanara's optional semantic retrieval subsystem with local or cloud embeddings. When selected by Memory Search, it gives external agent runtimes **read-only** access to your work memory—they can retrieve it, but cannot write memory, change the index, alter settings, or control the service lifecycle.
 
 Retrieval quality is managed at two levels: the server runs a deterministic, baseline-first adaptive pass, and only when it returns weak or ambiguous evidence does the external runtime's own LLM reflect further. `nova-RAG` also manages recall quality through query evaluation, candidate promotion, a protected index lifecycle, and safe rollback. For the complete read-only API, request schema, and error semantics, see the [nova-RAG External Agent Runtime Contract](docs/rag-external-agent-contract.md).
 
@@ -329,6 +352,7 @@ Retrieval quality is managed at two levels: the server runs a deterministic, bas
 - **External-provider boundary:** When an external LLM or embedding provider is configured, relevant content is sent according to the selected endpoint and provider data policy.
 - **Input becomes output:** If source logs or materials already contain secrets or sensitive information, generated diaries, reports, and indexes may faithfully preserve them.
 - **Non-invasive boundary:** Actanara does not rewrite supported runtimes' historical data or take over their execution. It creates only its own runtime, CLI shim, optional skills, and managed services.
+- **External memory boundary:** The anonymous generic `/api/memory/external/*` facade requires both a loopback peer and loopback Host; native Agent Runtime collection is limited to documented allowlisted files and can be disabled per Runtime, tool, instruction scope, or RAG ingestion scope.
 
 ## 📐 Development, Testing, and Reproducible Releases
 
@@ -383,6 +407,7 @@ The release builder accepts only a clean, committed Git worktree and writes outp
 - ⚙️ [Local Operations Runbook](docs/local-operations-runbook.md)
 - 📖 [New User Onboarding Runbook](docs/new-user-onboarding-runbook.md)
 - 🧭 [CLI Product Boundary](docs/cli-boundary.md)
+- 🔎 [Memory Search and Local Recall](docs/memory-search.md)
 
 ### Integration and Product Design
 

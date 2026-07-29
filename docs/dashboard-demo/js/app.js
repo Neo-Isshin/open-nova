@@ -18,6 +18,8 @@ function escapeHtml(text) {
   return div.innerHTML;
 }
 
+const ACTANARA_GITHUB_URL = 'https://github.com/Neo-Isshin/actanara';
+
 function toggleSection(el) {
   el.classList.toggle('open');
   const items = el.nextElementSibling;
@@ -329,7 +331,7 @@ const DASHBOARD_SHELL_TEXT = {
     settingsTitle: '系统设置',
     llmButton: '🔑 LLM',
     llmTitle: '日记生成 LLM Provider',
-    githubTitle: 'GitHub 项目主页待配置',
+    githubTitle: '在新标签页打开 Actanara GitHub 项目主页',
     i18nTitle: '中英文切换待实现',
     historyBackfill: '生成历史数据',
     backgroundTasksMonitor: '后台任务监控',
@@ -445,7 +447,7 @@ const DASHBOARD_SHELL_TEXT = {
     settingsTitle: 'System Settings',
     llmButton: '🔑 LLM',
     llmTitle: 'Diary Generation LLM Provider',
-    githubTitle: 'GitHub project home not configured',
+    githubTitle: 'Open the Actanara GitHub project home in a new tab',
     i18nTitle: 'Language switching pending',
     historyBackfill: 'Generate Historical Data',
     backgroundTasksMonitor: 'Background Task Monitor',
@@ -1231,7 +1233,6 @@ const OPERATOR_UI_TEXT = {
     installFailed: '安装失败: ',
     uninstallFailed: '卸载失败: ',
     githubProject: 'GitHub 项目主页',
-    githubTodo: 'GitHub 跳转链接待配置。该按钮已预留，确认项目主页后接入。',
     i18nSwitch: '中英文切换',
     i18nTodo: '中英文切换暂不启用。该能力可能影响生产 prompt payload 语言边界，需要单独评审后实现。',
     settingsTitle: 'Actanara 设置',
@@ -1246,7 +1247,7 @@ const OPERATOR_UI_TEXT = {
     configFile: '配置文件：',
     saveSettings: '保存设置',
     saving: '保存中…',
-    githubSectionNote: '项目主页链接待确认；按钮当前不跳转。',
+    githubSectionNote: '访问 Actanara GitHub 项目主页（将在新标签页打开）。',
     llmProviderList: 'LLM Provider 列表',
     llmProviderListNote: 'Provider 下拉列表暂时只包含 MiniMax；后续将扩展 OpenAI-compatible、Anthropic、Gemini 等提供商。',
     cliReserved: 'CLI 预留',
@@ -1471,7 +1472,6 @@ const OPERATOR_UI_TEXT = {
     installFailed: 'Install failed: ',
     uninstallFailed: 'Uninstall failed: ',
     githubProject: 'GitHub Project Home',
-    githubTodo: 'GitHub link is not configured yet. This button is reserved until the project home is confirmed.',
     i18nSwitch: 'Language Switch',
     i18nTodo: 'Language switching is not enabled yet. It may affect production prompt payload language boundaries and requires a separate review.',
     settingsTitle: 'Actanara Settings',
@@ -1486,7 +1486,7 @@ const OPERATOR_UI_TEXT = {
     configFile: 'Config file: ',
     saveSettings: 'Save Settings',
     saving: 'Saving...',
-    githubSectionNote: 'Project home link is not confirmed; the button does not navigate yet.',
+    githubSectionNote: 'Visit the Actanara GitHub project home (opens in a new tab).',
     llmProviderList: 'LLM Provider List',
     llmProviderListNote: 'The provider dropdown currently includes only MiniMax; OpenAI-compatible, Anthropic, Gemini, and other providers will be added later.',
     cliReserved: 'CLI Reserved',
@@ -4696,11 +4696,6 @@ function modalBack() {
   }
 }
 
-function openGithubTodo() {
-  const labels = operatorText();
-  openModal(labels.githubProject, '<div class="settings-note">' + escapeHtml(labels.githubTodo) + '</div>');
-}
-
 function openI18nTodo() {
   const labels = operatorText();
   openModal(labels.i18nSwitch, '<div class="settings-note">' + escapeHtml(labels.i18nTodo) + '</div>');
@@ -5858,7 +5853,7 @@ function renderFutureSettings(todos) {
   return `
     <div class="settings-section">
       <div class="settings-section-title">GitHub</div>
-      <div class="settings-note">${escapeHtml(labels.githubSectionNote)}</div>
+      <div class="settings-note"><a href="${ACTANARA_GITHUB_URL}" target="_blank" rel="noopener noreferrer">${escapeHtml(labels.githubSectionNote)}</a></div>
     </div>
     <div class="settings-section">
       <div class="settings-section-title">${escapeHtml(labels.i18nSwitch)}</div>

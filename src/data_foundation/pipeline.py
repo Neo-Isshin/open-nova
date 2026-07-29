@@ -47,6 +47,7 @@ from .refresh import run_pipeline_blank_day_materialization, run_pipeline_daily_
 from .settings import (
     is_nova_task_enabled,
     llm_provider_readiness_error,
+    resolve_memory_search_settings,
     resolve_pipeline_settings,
     resolve_runtime_source,
     runtime_environment_overrides,
@@ -1000,6 +1001,34 @@ def materialize_blank_day_pipeline_outputs(date_str: str, paths: RuntimePaths | 
         return False
 
 
+def sync_local_memory_after_pipeline(paths: RuntimePaths | None = None) -> dict[str, Any]:
+    """Refresh lexical recall after materialization without making it a pipeline gate."""
+    selected = paths or load_paths()
+    settings = resolve_memory_search_settings(selected)
+    local = settings.get("local") if isinstance(settings.get("local"), dict) else {}
+    if (
+        settings.get("enabled") is not True
+        or local.get("enabled") is not True
+        or local.get("syncAfterPipeline") is not True
+    ):
+        return {
+            "status": "skipped",
+            "available": False,
+            "reason": "local-memory-pipeline-sync-disabled",
+        }
+    try:
+        from .local_memory_search import sync_local_memory_index
+
+        return sync_local_memory_index(selected)
+    except Exception as exc:
+        return {
+            "status": "degraded",
+            "available": False,
+            "reason": f"local-memory-pipeline-sync-failed:{exc.__class__.__name__}",
+            "error": str(exc),
+        }
+
+
 def run_daily_pipeline(
     business_date: date | str | None = None,
     *,
@@ -1372,6 +1401,13 @@ def run_daily_pipeline(
                         failure_class="internal_error",
                         stage_id=post_stage_id,
                         append_outcome=False,
+                    )
+                local_memory_sync = sync_local_memory_after_pipeline(selected)
+                if local_memory_sync.get("status") == "degraded":
+                    _print_pipeline_status(
+                        "[!]",
+                        "Update local memory",
+                        "Continuing with bounded lexical fallback.",
                     )
                 if blank_day_fast_path:
                     _print_pipeline_status("[-]", "Update search memory", "No new activity to index.")

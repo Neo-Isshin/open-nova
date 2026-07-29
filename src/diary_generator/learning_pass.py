@@ -27,6 +27,7 @@ from data_foundation.diary_paths import (
 from data_foundation.infrastructure import apply_infrastructure_updates, render_infrastructure_graph_context
 from data_foundation.time import business_today, business_now
 from data_foundation.llm_json import LLMJsonParseError, parse_llm_json_object
+from data_foundation.memory_corpus import merge_lessons_into_canonical
 from data_foundation.paths import load_paths
 from data_foundation.llm_execution import execute_llm_message
 
@@ -444,23 +445,14 @@ def process_learning(date_str, summary_text):
 
     # 1. 处理教训 (Lessons)
     lessons = data.get('lessons', [])
-    if lessons:
-        lessons_file = _runtime_diary_root() / "lessons.jsonl"
-        lessons_file.parent.mkdir(parents=True, exist_ok=True)
-        existing_ids = set()
-        if lessons_file.exists():
-            with open(lessons_file, "r") as f:
-                for line in f:
-                    try: existing_ids.add(json.loads(line)['id'])
-                    except: pass
-
-        with open(lessons_file, "a") as f:
-            l_count = 0
-            for l in lessons:
-                if l.get('id') not in existing_ids:
-                    f.write(json.dumps(l, ensure_ascii=False) + "\n")
-                    l_count += 1
-            print(f"   ✅ Ingested {l_count} new lessons.")
+    lessons_result = merge_lessons_into_canonical(load_paths(), lessons)
+    if lessons or lessons_result["migrated"]:
+        print(f"   ✅ Ingested {lessons_result['added']} new lessons.")
+        if lessons_result["migrated"]:
+            print(
+                "   ♻️ Migrated "
+                f"{lessons_result['migrated']} legacy lessons to {lessons_result['path']}."
+            )
 
     # 2. 处理环境变动 (Infra)
     infra_updates = data.get('infra', [])

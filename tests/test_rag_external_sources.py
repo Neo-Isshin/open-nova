@@ -92,7 +92,15 @@ class RagExternalSourceTests(unittest.TestCase):
             source = root / "sources"
             source.mkdir()
             _paths, supplement = self._settings(root, [source], mode="supplement")
-            self.assertEqual(effective_indexing_source_sets(supplement), ("lessons", "external-content"))
+            self.assertEqual(
+                effective_indexing_source_sets(supplement),
+                (
+                    "lessons",
+                    "agent-native-memory",
+                    "agent-native-instructions",
+                    "external-content",
+                ),
+            )
             _paths, replace = self._settings(root, [source], mode="replace")
             self.assertEqual(effective_indexing_source_sets(replace), ("external-content",))
             self.assertEqual(replace.to_dict()["external_sources"]["paths"], [str(source)])

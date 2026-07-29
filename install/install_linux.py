@@ -84,6 +84,13 @@ FRESH_INSTALL_SCHEMA_VERSION = 1
 FRESH_INSTALL_LOCK_NAME = ".update-transaction.lock"
 FRESH_MISSING_HASH = "missing"
 FRESH_TRANSACTION_ID_RE = re.compile(r"[0-9]{8}T[0-9]{6}-[0-9]+-[0-9a-f]{8}\Z")
+MEMORY_SKILL_SUPPORTED_TOOLS = (
+    "openclaw",
+    "claudeCode",
+    "codex",
+    "geminiCli",
+    "hermes",
+)
 
 
 class LinuxInstallError(RuntimeError):
@@ -129,6 +136,8 @@ class InstallPlan:
     update_mode: str
     force_rebuild: bool
     profile_evidence: dict | None
+    register_memory_skills: bool
+    memory_skill_tools: tuple[str, ...]
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -143,6 +152,26 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-dashboard", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--no-scheduler", action="store_true")
     parser.add_argument("--enable-rag", action="store_true")
+    parser.add_argument(
+        "--register-memory-skills",
+        "--register-rag-skills",
+        dest="register_memory_skills",
+        action="store_true",
+        help=(
+            "Connect Actanara memory search to detected external agent tools. "
+            "This does not require nova-RAG."
+        ),
+    )
+    parser.add_argument(
+        "--memory-skill-tool",
+        action="append",
+        choices=MEMORY_SKILL_SUPPORTED_TOOLS,
+        default=[],
+        help=(
+            "Limit memory skill registration to this external tool ID; repeat for "
+            "multiple tools. Supplying this option is an explicit opt-in."
+        ),
+    )
     parser.add_argument("--rag-embedding-mode", choices=("local", "cloud"))
     linger = parser.add_mutually_exclusive_group()
     linger.add_argument(
@@ -223,6 +252,8 @@ def build_plan(args: argparse.Namespace) -> InstallPlan:
     runtime = Path(args.runtime).expanduser().absolute()
     python = Path(shutil.which(args.python) or args.python).expanduser().absolute()
     update_mode = _requested_update_mode(args)
+    memory_skill_tools = tuple(dict.fromkeys(args.memory_skill_tool))
+    register_memory_skills = bool(args.register_memory_skills or memory_skill_tools)
     profile_evidence: dict | None = None
     if update_mode == "fresh":
         dashboard_host = args.dashboard_host or "127.0.0.1"
@@ -336,6 +367,8 @@ def build_plan(args: argparse.Namespace) -> InstallPlan:
         update_mode=update_mode,
         force_rebuild=bool(args.force_rebuild),
         profile_evidence=profile_evidence,
+        register_memory_skills=register_memory_skills,
+        memory_skill_tools=memory_skill_tools,
     )
 
 
@@ -983,6 +1016,44 @@ def _write_cli_shim(runtime: Path, *, staging: Path | None = None) -> None:
     shim.chmod(0o755)
 
 
+def _memory_skill_registration_preference(
+    selected_tools: Iterable[str],
+    *,
+    status: str,
+    auto_detect: bool = False,
+    eligible_tools: Iterable[str] = (),
+    excluded_tools: Iterable[dict] = (),
+) -> dict:
+    selected = list(dict.fromkeys(str(tool) for tool in selected_tools if str(tool)))
+    eligible = list(dict.fromkeys(str(tool) for tool in eligible_tools if str(tool)))
+    return {
+        "status": status,
+        "supportedNow": True,
+        "purpose": "cross-agent-memory-search",
+        "scope": (
+            "Installer and Dashboard-managed registration of one Actanara Memory "
+            "Search skill into detected, selected, supported tools' global layer"
+        ),
+        "backendPolicy": "runtime-auto: nova-RAG when healthy, otherwise local lexical recall",
+        "selectedTools": selected,
+        "autoDetectTools": bool(auto_detect),
+        "eligibleTools": eligible,
+        "excludedTools": [dict(item) for item in excluded_tools if isinstance(item, dict)],
+        "dryRunEndpoint": "GET /api/settings/external-tools/memory-skill-registration/plan",
+        "applyEndpoint": "POST /api/settings/external-tools/memory-skill-registration",
+        "confirmationTextRequired": "INSTALL ACTANARA MEMORY SKILL",
+        "acceptedConfirmationTexts": [
+            "INSTALL ACTANARA MEMORY SKILL",
+            "INSTALL ACTANARA RAG SKILL",
+        ],
+        "mutationPolicy": (
+            "installer writes missing skill files after the Runtime installation commits; "
+            "verified older generated versions are backed up and upgraded; customized or "
+            "newer files are preserved"
+        ),
+    }
+
+
 def _runtime_settings_update(plan: InstallPlan) -> dict:
     from data_foundation.pipeline_language import resolve_pipeline_language_profile
 
@@ -1001,7 +1072,7 @@ def _runtime_settings_update(plan: InstallPlan) -> dict:
                 "device": "auto",
             }
         )
-    return {
+    update = {
         "general": {
             "locale": language.locale,
             "workspaceRoot": str(source),
@@ -1042,6 +1113,15 @@ def _runtime_settings_update(plan: InstallPlan) -> dict:
             "languageProfile": language.rag_language_profile,
         },
     }
+    if plan.register_memory_skills:
+        update["externalTools"] = {
+            "installerV2SkillRegistration": _memory_skill_registration_preference(
+                plan.memory_skill_tools,
+                status="installer-selected",
+                auto_detect=not bool(plan.memory_skill_tools),
+            )
+        }
+    return update
 
 
 def _configure_runtime(
@@ -1122,6 +1202,218 @@ def _configure_runtime(
             os.close(directory)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def _memory_skill_tool_ids(raw: object) -> list[str]:
+    if not isinstance(raw, list):
+        return []
+    selected: list[str] = []
+    for item in raw:
+        tool = str(item.get("key") or "") if isinstance(item, dict) else str(item)
+        if tool in MEMORY_SKILL_SUPPORTED_TOOLS and tool not in selected:
+            selected.append(tool)
+    return selected
+
+
+def _reconcile_memory_skills(plan: InstallPlan) -> dict:
+    """Apply the optional global Memory skill after the Runtime has committed.
+
+    Global agent skill roots are not Runtime-owned rollback targets. Keeping
+    this reconciliation outside the fresh/update transaction means a failure
+    cannot turn an otherwise committed Runtime install into a failed update.
+    """
+
+    mode = str(getattr(plan, "update_mode", ""))
+    explicit = bool(getattr(plan, "register_memory_skills", False))
+    requested_tools = list(getattr(plan, "memory_skill_tools", ()) or ())
+    dry_run = bool(getattr(plan, "dry_run", False))
+    if mode not in {"fresh", "upgrade"}:
+        return {
+            "status": "skipped",
+            "reason": "memory-skill-registration-not-applicable-to-update-mode",
+            "bestEffort": True,
+        }
+    if mode == "fresh" and not explicit:
+        return {
+            "status": "skipped",
+            "reason": "memory-skill-registration-not-requested",
+            "bestEffort": True,
+        }
+
+    from dashboard.app.services.external_rag_skill_registration import (
+        MEMORY_CONFIRMATION_TEXT,
+        existing_memory_skill_tools,
+        queue_memory_skill_registration,
+    )
+    from data_foundation.external_tool_catalog import detected_external_tool_ids
+    from data_foundation.paths import runtime_paths_for_home
+    from data_foundation.settings import read_settings, write_settings
+
+    paths = runtime_paths_for_home(Path(plan.runtime))
+    prior_home = os.environ.get("ACTANARA_HOME")
+    os.environ["ACTANARA_HOME"] = str(plan.runtime)
+    try:
+        settings = read_settings(
+            paths,
+            redact_secrets=True,
+            persist_defaults=False,
+        )
+        external = (
+            settings.get("externalTools")
+            if isinstance(settings.get("externalTools"), dict)
+            else {}
+        )
+        preference = (
+            external.get("installerV2SkillRegistration")
+            if isinstance(external.get("installerV2SkillRegistration"), dict)
+            else {}
+        )
+        existing_tools = existing_memory_skill_tools(paths)
+        previously_enabled = (
+            preference.get("supportedNow") is True
+            and str(preference.get("status") or "")
+            in {
+                "dashboard-controlled",
+                "installer-applied",
+                "installer-selected",
+                "reconcile-pending",
+                "reconciled",
+            }
+        ) or bool(existing_tools)
+        if mode == "upgrade" and not explicit and not previously_enabled:
+            return {
+                "status": "skipped",
+                "reason": "memory-skill-registration-not-previously-enabled",
+                "bestEffort": True,
+            }
+
+        detected = set(detected_external_tool_ids(paths))
+        if explicit and requested_tools:
+            selected = _memory_skill_tool_ids(requested_tools)
+        elif explicit:
+            selected = [
+                tool for tool in MEMORY_SKILL_SUPPORTED_TOOLS if tool in detected
+            ]
+        else:
+            selected = _memory_skill_tool_ids(preference.get("selectedTools"))
+            if not selected:
+                selected = _memory_skill_tool_ids(
+                    external.get("installerSelectedTools")
+                )
+            if not selected:
+                selected = list(existing_tools)
+
+        if dry_run:
+            return {
+                "status": "planned",
+                "bestEffort": True,
+                "selectedTools": selected,
+                "detectedTools": [
+                    tool for tool in MEMORY_SKILL_SUPPORTED_TOOLS if tool in detected
+                ],
+                "wouldWrite": bool(selected),
+            }
+
+        status = "reconciled" if mode == "upgrade" else "installer-applied"
+        pending_status = (
+            "reconcile-pending" if mode == "upgrade" else "installer-selected"
+        )
+        auto_detect = explicit and not requested_tools
+        write_settings(
+            {
+                "externalTools": {
+                    "installerSelectedTools": selected,
+                    "installerV2SkillRegistration": (
+                        _memory_skill_registration_preference(
+                            selected,
+                            status=pending_status,
+                            auto_detect=auto_detect,
+                        )
+                    ),
+                }
+            },
+            paths,
+        )
+        if not selected:
+            return {
+                "status": "skipped",
+                "reason": "no-detected-supported-memory-skill-tools",
+                "bestEffort": True,
+                "selectedTools": [],
+            }
+
+        result = queue_memory_skill_registration(
+            {
+                "tools": selected,
+                "dryRun": False,
+                "overwrite": False,
+                "confirmationText": MEMORY_CONFIRMATION_TEXT,
+            },
+            requested_by=(
+                "installer-linux-upgrade-reconcile"
+                if mode == "upgrade"
+                else "installer-linux"
+            ),
+        )
+        job = result.get("job") if isinstance(result.get("job"), dict) else {}
+        eligible = (
+            job.get("eligibleTools")
+            if isinstance(job.get("eligibleTools"), list)
+            else []
+        )
+        excluded = (
+            job.get("excludedTools")
+            if isinstance(job.get("excludedTools"), list)
+            else []
+        )
+        persisted_status = status if eligible else pending_status
+        write_settings(
+            {
+                "externalTools": {
+                    "installerSelectedTools": selected,
+                    "installerV2SkillRegistration": (
+                        _memory_skill_registration_preference(
+                            selected,
+                            status=persisted_status,
+                            auto_detect=auto_detect,
+                            eligible_tools=eligible,
+                            excluded_tools=excluded,
+                        )
+                    ),
+                }
+            },
+            paths,
+        )
+        return {
+            "status": "completed",
+            "bestEffort": True,
+            "selectedTools": selected,
+            "eligibleTools": eligible,
+            "excludedTools": excluded,
+            "results": (
+                result.get("results")
+                if isinstance(result.get("results"), list)
+                else []
+            ),
+        }
+    finally:
+        if prior_home is None:
+            os.environ.pop("ACTANARA_HOME", None)
+        else:
+            os.environ["ACTANARA_HOME"] = prior_home
+
+
+def _reconcile_memory_skills_best_effort(plan: InstallPlan) -> dict:
+    try:
+        return _reconcile_memory_skills(plan)
+    except Exception as exc:
+        return {
+            "status": "failed",
+            "bestEffort": True,
+            "installationStatusUnaffected": True,
+            "error": str(exc),
+            "nextStep": "Retry Memory skill registration from Dashboard Settings.",
+        }
 
 
 def _initialize_database(
@@ -4918,6 +5210,9 @@ def main(argv: list[str] | None = None) -> int:
             finally:
                 os.umask(previous_umask)
             payload["linger"] = linger
+        payload["memorySkillRegistration"] = (
+            _reconcile_memory_skills_best_effort(plan)
+        )
         if args.result_json:
             _print_result_envelope(
                 _result_envelope(payload=payload, requested_mode=requested_mode)

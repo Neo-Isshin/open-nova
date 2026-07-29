@@ -7,6 +7,35 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class DashboardStaticContractTests(unittest.TestCase):
+    def test_advanced_settings_expose_native_memory_default_and_scope_controls(self):
+        script = (ROOT / "src" / "dashboard" / "app" / "static" / "js" / "app.js").read_text(encoding="utf-8")
+        self.assertIn('data-tab="memory"', script)
+        self.assertIn('data-pane="memory"', script)
+        self.assertIn("renderNativeMemorySettings(memorySearch)", script)
+        self.assertIn("tabMemory: '记忆'", script)
+        self.assertIn("tabMemory: 'Memory'", script)
+        self.assertIn("nativeMemoryTitle: 'Agent Native Memory'", script)
+        self.assertIn("const enabled = nativeMemory.enabled !== false", script)
+        self.assertIn("tools.codex !== false ? 'checked'", script)
+        self.assertIn("tools.claudeCode !== false ? 'checked'", script)
+        self.assertIn("nativeMemory.includeInstructions !== false ? 'checked'", script)
+        self.assertIn("nativeMemory.allowInRag !== false ? 'checked'", script)
+        self.assertIn("${escapeHtml(labels.nativeMemoryTitle)}", script)
+        self.assertIn('id="setNativeMemoryEnabled"', script)
+        self.assertIn('id="setNativeMemoryCodex"', script)
+        self.assertIn('id="setNativeMemoryClaudeCode"', script)
+        self.assertIn('id="setNativeMemoryIncludeInstructions"', script)
+        self.assertIn('id="setNativeMemoryAllowInRag"', script)
+        self.assertIn("function syncNativeMemorySettingsState()", script)
+        self.assertIn("payload.memorySearch = collectNativeMemorySettingsFromModal()", script)
+        collect_body = script.split("function collectNativeMemorySettingsFromModal()", 1)[1].split("function collectPipelineSettingsFromModal()", 1)[0]
+        self.assertIn("nativeMemory:", collect_body)
+        self.assertIn("allowInRag:", collect_body)
+        self.assertIn("includeInstructions:", collect_body)
+        self.assertIn("codex:", collect_body)
+        self.assertIn("claudeCode:", collect_body)
+        self.assertIn("'memory', 'authority'", script)
+
     def test_service_settings_use_active_provider_without_linux_facing_launchd_fallback(self):
         script = (ROOT / "src" / "dashboard" / "app" / "static" / "js" / "app.js").read_text(encoding="utf-8")
         self.assertIn("status, runtime state, and definition alignment come from the active service manager", script)
@@ -755,7 +784,30 @@ class DashboardStaticContractTests(unittest.TestCase):
         self.assertLess(html.index("sidebar-bottom-nav"), html.index("sidebar-utility"))
         self.assertIn("openSettingsModal()", html)
         self.assertIn("openLlmProviderModal()", html)
-        self.assertIn("openGithubTodo()", html)
+        github_url = "https://github.com/Neo-Isshin/actanara"
+        github_surfaces = {
+            "runtime": (
+                ROOT / "src" / "dashboard" / "app" / "static" / "index.html",
+                ROOT / "src" / "dashboard" / "app" / "static" / "js" / "app.js",
+            ),
+            "static-demo": (
+                ROOT / "docs" / "dashboard-demo" / "index.html",
+                ROOT / "docs" / "dashboard-demo" / "js" / "app.js",
+            ),
+        }
+        for name, (index_path, script_path) in github_surfaces.items():
+            with self.subTest(github_surface=name):
+                github_html = index_path.read_text(encoding="utf-8")
+                github_script = script_path.read_text(encoding="utf-8")
+                self.assertIn(f'href="{github_url}"', github_html)
+                self.assertIn('target="_blank"', github_html)
+                self.assertIn('rel="noopener noreferrer"', github_html)
+                self.assertIn('data-i18n-aria-label="githubTitle"', github_html)
+                self.assertNotIn("openGithubTodo()", github_html)
+                self.assertIn(f"const ACTANARA_GITHUB_URL = '{github_url}'", github_script)
+                self.assertIn('target="_blank" rel="noopener noreferrer"', github_script)
+                self.assertNotIn("function openGithubTodo()", github_script)
+        self.assertIn('href="${ACTANARA_GITHUB_URL}"', script)
         self.assertIn("openI18nTodo()", html)
         self.assertIn("function openSettingsModal()", script)
         self.assertIn("fetch('/api/settings')", script)
@@ -1175,13 +1227,20 @@ class DashboardStaticContractTests(unittest.TestCase):
         self.assertIn("openRagExternalSkillRegistration()", script)
         self.assertIn("fetch('/api/rag/profile/migrate'", script)
         self.assertIn('@router.post("/rag/profile/migrate/plan")', router)
-        self.assertIn("fetch('/api/settings/external-tools/rag-skill-registration/plan'", script)
-        self.assertIn("fetch('/api/settings/external-tools/rag-skill-registration'", script)
+        self.assertIn("fetch('/api/settings/external-tools/memory-skill-registration/plan'", script)
+        self.assertIn("fetch('/api/settings/external-tools/memory-skill-registration'", script)
+        self.assertIn("selectedMemorySkillRegistrationTools()", script)
+        self.assertIn("JSON.stringify({dryRun: true, overwrite, tools})", script)
+        self.assertIn("JSON.stringify({dryRun: false, overwrite, confirmationText, tools})", script)
         self.assertIn("status.productEnabled !== false", script)
         self.assertIn("status.disabledReason", script)
         self.assertNotIn("id=\"ragSearchSection\"", script)
         self.assertIn("fetch('/api/rag/status?probe=true')", script)
-        self.assertIn("fetch('/api/rag/search'", script)
+        self.assertIn("fetch('/api/memory/search'", script)
+        self.assertIn("mode: 'auto'", script)
+        self.assertIn("caller: 'dashboard'", script)
+        self.assertIn("backend.kind", script)
+        self.assertIn("backend.semantic", script)
 
     def test_tasks_sse_reuses_nova_task_enabled_gate(self):
         router = (ROOT / "src" / "dashboard" / "app" / "routers" / "ai_assets.py").read_text(encoding="utf-8")
@@ -1203,6 +1262,15 @@ class DashboardStaticContractTests(unittest.TestCase):
         self.assertIn('openBackgroundTasksModal()', html)
         self.assertIn("loadRagSearchPage()", script)
         self.assertIn("runRagPageSearch()", script)
+        page_search = script.split("async function runRagPageSearch()", 1)[1].split(
+            "function renderRagSearchResult", 1
+        )[0]
+        self.assertIn("fetch('/api/memory/search'", page_search)
+        self.assertIn("mode: 'auto'", page_search)
+        self.assertIn("caller: 'dashboard'", page_search)
+        self.assertIn("backend.kind", page_search)
+        self.assertIn("backend.semantic", page_search)
+        self.assertNotIn("fetch('/api/rag/search'", page_search)
         self.assertIn("function runRagProductionSync()", script)
         self.assertIn("SYNC ACTANARA RAG", script)
         self.assertIn("RAG_PRODUCTION_SYNC_BUSY", script)
@@ -1219,7 +1287,7 @@ class DashboardStaticContractTests(unittest.TestCase):
         self.assertIn("function closeRagSearchCoverage()", script)
         self.assertIn("window._lastRagSearchStatus = data", script)
         self.assertIn("fetch('/api/rag/status?probe=true')", script)
-        self.assertIn("fetch('/api/rag/search'", script)
+        self.assertIn("fetch('/api/memory/search'", script)
         self.assertIn("autoPromote: initMode", script)
         self.assertIn("submitBtn.disabled = true", script)
         self.assertIn("初始化会保存 nova-RAG 配置，在后台生成 v2 candidate index，并在成功后自动 promote", script)
@@ -1239,6 +1307,9 @@ class DashboardStaticContractTests(unittest.TestCase):
         self.assertIn('@router.get("/settings/external-tools/rag-skill-registration/plan")', router)
         self.assertIn('@router.post("/settings/external-tools/rag-skill-registration")', router)
         self.assertIn('@router.get("/settings/external-tools/rag-skill-registration/jobs")', router)
+        self.assertIn('@router.get("/settings/external-tools/memory-skill-registration/plan")', router)
+        self.assertIn('@router.post("/settings/external-tools/memory-skill-registration")', router)
+        self.assertIn('@router.get("/settings/external-tools/memory-skill-registration/jobs")', router)
         self.assertIn('@router.post("/rag/external/index/run")', router)
         self.assertIn('@router.put("/rag/external/settings")', router)
         self.assertIn('"mutationAllowed": False', service)

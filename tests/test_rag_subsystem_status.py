@@ -72,9 +72,15 @@ class RagSubsystemStatusTests(unittest.TestCase):
             self.assertEqual(settings.legacy_index_path, root / "Diary" / "__diary_rag" / "index.jsonl")
             self.assertEqual(settings.diary_source_root, paths.diary_dir)
             self.assertEqual(settings.v2_store_path, paths.home / "reserved" / "rag" / "v2")
-            self.assertEqual(settings.indexing_source_sets, DEFAULT_INDEXING_SOURCE_SETS)
+            self.assertEqual(
+                settings.indexing_source_sets,
+                DEFAULT_INDEXING_SOURCE_SETS
+                + ("agent-native-memory", "agent-native-instructions"),
+            )
             self.assertNotIn("legacy-diary-daily", settings.indexing_source_sets)
             self.assertIn("filtered-dialogue-daily", settings.indexing_source_sets)
+            self.assertIn("agent-native-memory", settings.indexing_source_sets)
+            self.assertIn("agent-native-instructions", settings.indexing_source_sets)
             self.assertFalse(settings.reranker_enabled)
             self.assertEqual(settings.retrieval_latency_budget_seconds, 60.0)
             self.assertEqual(settings.retrieval_max_concurrent_searches, 2)
@@ -2956,7 +2962,7 @@ class RagSubsystemStatusTests(unittest.TestCase):
                     "chunkCount": 1,
                     "embeddingCount": 1,
                     "dimensionMismatchCount": 0,
-                    "sourceSets": ["lessons"],
+                    "sourceSets": list(settings.indexing_source_sets),
                 },
             }
 
@@ -3007,7 +3013,7 @@ class RagSubsystemStatusTests(unittest.TestCase):
                         "chunkCount": 1,
                         "embeddingCount": 1,
                         "dimensionMismatchCount": 0,
-                        "sourceSets": ["lessons"],
+                        "sourceSets": list(settings.indexing_source_sets),
                     },
                     "run": {"runId": "run-1"},
                 }

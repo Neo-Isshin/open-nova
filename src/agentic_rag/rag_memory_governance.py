@@ -95,6 +95,20 @@ SOURCE_SET_POLICIES: dict[str, dict[str, Any]] = {
         "retrievalWeight": 1.0,
         "canonicalEligible": False,
     },
+    "agent-native-memory": {
+        "authorityRank": 68,
+        "lifecycle": "agent-native-memory",
+        "retention": "agent-runtime-controlled",
+        "retrievalWeight": 0.96,
+        "canonicalEligible": False,
+    },
+    "agent-native-instructions": {
+        "authorityRank": 74,
+        "lifecycle": "agent-native-instructions",
+        "retention": "agent-runtime-controlled",
+        "retrievalWeight": 0.98,
+        "canonicalEligible": False,
+    },
 }
 
 DEFAULT_POLICY = {

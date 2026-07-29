@@ -20,6 +20,7 @@ function escapeHtml(text) {
 
 const ACTANARA_CSRF_COOKIE = 'actanara_dashboard_csrf';
 const ACTANARA_CSRF_HEADER = 'X-Actanara-CSRF';
+const ACTANARA_GITHUB_URL = 'https://github.com/Neo-Isshin/actanara';
 const ACTANARA_NATIVE_FETCH = window.fetch.bind(window);
 
 function actanaraCookie(name) {
@@ -150,6 +151,7 @@ let HISTORY_BACKFILL_LAST_PLAN_KEY = '';
 let HISTORY_BACKFILL_LAST_PLAN_PAYLOAD = null;
 let HISTORY_BACKFILL_PENDING_SELECTION = new Set();
 let RAG_PRODUCTION_SYNC_BUSY = false;
+let MEMORY_SKILL_PLAN_GENERATION = 0;
 let ACTANARA_DASHBOARD_TIMEZONE = Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Hong_Kong';
 let ACTANARA_PIPELINE_LANGUAGE_PROFILE = 'zh';
 let ACTANARA_SETTINGS_LOADED = false;
@@ -538,7 +540,7 @@ const DASHBOARD_SHELL_TEXT = {
     settingsTitle: '系统设置',
     llmButton: '🔑 LLM',
     llmTitle: '日记生成 LLM Provider',
-    githubTitle: 'GitHub 项目主页待配置',
+    githubTitle: '在新标签页打开 Actanara GitHub 项目主页',
     i18nTitle: '中英文切换待实现',
     historyBackfill: '生成历史数据',
     backgroundTasksMonitor: '后台任务监控',
@@ -657,7 +659,7 @@ const DASHBOARD_SHELL_TEXT = {
     settingsTitle: 'System Settings',
     llmButton: '🔑 LLM',
     llmTitle: 'Diary Generation LLM Provider',
-    githubTitle: 'GitHub project home not configured',
+    githubTitle: 'Open the Actanara GitHub project home in a new tab',
     i18nTitle: 'Language switching pending',
     historyBackfill: 'Generate Historical Data',
     backgroundTasksMonitor: 'Background Task Monitor',
@@ -1118,6 +1120,21 @@ const RAG_UI_TEXT = {
     activeRun: 'Active Run',
     chunks: 'Chunks',
     documents: 'Documents',
+    localMemoryTitle: '本地轻量记忆',
+    localMemoryNote: '无需 Embedding 或模型服务；nova-RAG 不可用时，auto 检索会回退到此可重建的 SQLite FTS 索引。',
+    localMemoryBackend: '后端',
+    localMemoryIndex: '索引',
+    localMemorySources: '来源',
+    localMemoryDocuments: '文档',
+    localMemorySyncedAt: '同步时间',
+    localMemoryCapabilities: '能力',
+    syncLocalMemory: '同步本地索引',
+    rebuildLocalMemory: '重建本地索引',
+    syncingLocalMemory: '正在同步本地记忆索引…',
+    rebuildingLocalMemory: '正在重建本地记忆索引…',
+    localMemoryActionFailed: '本地记忆索引操作失败: ',
+    localMemoryStatusFailed: '本地记忆状态读取失败: ',
+    searchBackend: '检索后端',
     enabled: 'enabled',
     disabled: 'disabled',
     available: 'available',
@@ -1153,8 +1170,13 @@ const RAG_UI_TEXT = {
     migrationSubmitFailed: '迁移提交失败: ',
     confirmMigrationFallback: '确认迁移并加入后台任务',
     externalSkillTitle: '注册外部 Agent Memory Skill',
-    externalSkillNote: '将 nova-RAG 作为 read-only global skill 注册到 OpenClaw、Claude Code、Codex、Gemini CLI、Hermes。默认 dry-run；实际安装需要确认短语。',
-    externalSkillPolicy: 'read-only；不允许 memory write、index run、server lifecycle mutation。',
+    externalSkillNote: '将后端无关的 Actanara Memory Skill 注册到本机已检测且支持的 Agent。Skill 会自动选择 nova-RAG 或本地轻量检索。',
+    externalSkillPolicy: 'read-only；只写入明确勾选的工具，并保护定制 Skill 与更新版本。',
+    externalSkillTargets: '注册目标',
+    externalSkillTargetsNote: '这里只显示本机已检测且支持全局 Skill 的工具。请明确勾选需要注册的目标。',
+    selectRegistrationTarget: '请至少选择一个注册目标。',
+    detectedUnsupportedTools: '已检测但暂不支持全局 Skill：',
+    registrationAvailable: '可注册',
     overwriteSkill: '覆盖已有 skill（会先备份）',
     refreshPlan: '刷新计划',
     installSkill: '安装 Skill',
@@ -1282,6 +1304,21 @@ const RAG_UI_TEXT = {
     activeRun: 'Active Run',
     chunks: 'Chunks',
     documents: 'Documents',
+    localMemoryTitle: 'Local Memory Fallback',
+    localMemoryNote: 'Requires no embedding or model service. Auto search falls back to this rebuildable SQLite FTS index when nova-RAG is unavailable.',
+    localMemoryBackend: 'Backend',
+    localMemoryIndex: 'Index',
+    localMemorySources: 'Sources',
+    localMemoryDocuments: 'Documents',
+    localMemorySyncedAt: 'Synced',
+    localMemoryCapabilities: 'Capabilities',
+    syncLocalMemory: 'Sync Local Index',
+    rebuildLocalMemory: 'Rebuild Local Index',
+    syncingLocalMemory: 'Syncing the local memory index...',
+    rebuildingLocalMemory: 'Rebuilding the local memory index...',
+    localMemoryActionFailed: 'Local memory index action failed: ',
+    localMemoryStatusFailed: 'Local memory status failed: ',
+    searchBackend: 'Search backend',
     enabled: 'enabled',
     disabled: 'disabled',
     available: 'available',
@@ -1317,8 +1354,13 @@ const RAG_UI_TEXT = {
     migrationSubmitFailed: 'Migration submit failed: ',
     confirmMigrationFallback: 'Confirm migration and queue background task',
     externalSkillTitle: 'Register External Agent Memory Skill',
-    externalSkillNote: 'Register nova-RAG as a read-only global skill for OpenClaw, Claude Code, Codex, Gemini CLI, and Hermes. Defaults to dry-run; actual installation requires a confirmation phrase.',
-    externalSkillPolicy: 'read-only; memory write, index runs, and server lifecycle mutations are not allowed.',
+    externalSkillNote: 'Register the backend-neutral Actanara Memory Skill for detected and supported local agents. The skill automatically selects nova-RAG or local lexical recall.',
+    externalSkillPolicy: 'read-only; writes only to explicitly selected tools and preserves customized or newer skills.',
+    externalSkillTargets: 'Registration Targets',
+    externalSkillTargetsNote: 'Only tools detected locally and supporting global skills are shown. Explicitly select each target to register.',
+    selectRegistrationTarget: 'Select at least one registration target.',
+    detectedUnsupportedTools: 'Detected but global skills are not yet supported: ',
+    registrationAvailable: 'available',
     overwriteSkill: 'Overwrite existing skill (backs up first)',
     refreshPlan: 'Refresh Plan',
     installSkill: 'Install Skill',
@@ -1575,7 +1617,6 @@ const OPERATOR_UI_TEXT = {
     installFailed: '安装失败: ',
     uninstallFailed: '卸载失败: ',
     githubProject: 'GitHub 项目主页',
-    githubTodo: 'GitHub 跳转链接待配置。该按钮已预留，确认项目主页后接入。',
     i18nSwitch: '中英文切换',
     i18nTodo: '中英文切换暂不启用。该能力可能影响生产 prompt payload 语言边界，需要单独评审后实现。',
     settingsTitle: 'Actanara 设置',
@@ -1588,10 +1629,11 @@ const OPERATOR_UI_TEXT = {
     tabPaths: '路径设置',
     tabRuntimeSources: '数据源',
     tabExternalTools: '外部工具',
+    tabMemory: '记忆',
     configFile: '配置文件：',
     saveSettings: '保存设置',
     saving: '保存中…',
-    githubSectionNote: '项目主页链接待确认；按钮当前不跳转。',
+    githubSectionNote: '访问 Actanara GitHub 项目主页（将在新标签页打开）。',
     llmProviderList: 'LLM Provider 列表',
     llmProviderListNote: 'Provider 下拉列表暂时只包含 MiniMax；后续将扩展 OpenAI-compatible、Anthropic、Gemini 等提供商。',
     cliReserved: 'CLI 预留',
@@ -1645,6 +1687,14 @@ const OPERATOR_UI_TEXT = {
     noExternalTools: '暂无 externalTools 设置。',
     externalToolPaths: '外部工具路径',
     externalToolPathsNote: '这些路径写入 settings.json 的 externalTools，并影响 Dashboard 对 OpenClaw、Claude Code、Codex、Gemini CLI、Hermes、OpenCode、Antigravity、Cursor 等历史/当前资料的读取。',
+    nativeMemoryTitle: 'Agent 原生记忆',
+    nativeMemoryNote: '默认启用 Codex、Claude Code、指令文件与 nova-RAG 收录。Actanara 只读取受支持清单内的本机记忆文件；你可以关闭任一范围。',
+    nativeMemoryEnable: '启用 Agent 原生记忆收录',
+    nativeMemoryTools: '允许的 Agent',
+    nativeMemoryInstructions: '同时收录 Agent 指令文件',
+    nativeMemoryInstructionsNote: '指令文件可能包含长期偏好或敏感操作约束；如果不希望它们参与跨 Agent 检索，请关闭此项。',
+    nativeMemoryRag: '允许进入 nova-RAG 语义索引',
+    nativeMemoryRagNote: '关闭时原生记忆仅进入本地 SQLite 词法索引。启用 nova-RAG 收录后，需要重建 RAG 索引才能生效。',
     pipelineSettingsNote: '这些值会影响之后启动的 pipeline 子进程；已经运行中的 pipeline 不会被 retroactively 修改。',
     noStepTimeouts: '暂无 step timeout 配置。',
   },
@@ -1887,7 +1937,6 @@ const OPERATOR_UI_TEXT = {
     installFailed: 'Install failed: ',
     uninstallFailed: 'Uninstall failed: ',
     githubProject: 'GitHub Project Home',
-    githubTodo: 'GitHub link is not configured yet. This button is reserved until the project home is confirmed.',
     i18nSwitch: 'Language Switch',
     i18nTodo: 'Language switching is not enabled yet. It may affect production prompt payload language boundaries and requires a separate review.',
     settingsTitle: 'Actanara Settings',
@@ -1900,10 +1949,11 @@ const OPERATOR_UI_TEXT = {
     tabPaths: 'Paths',
     tabRuntimeSources: 'Data Sources',
     tabExternalTools: 'External Tools',
+    tabMemory: 'Memory',
     configFile: 'Config file: ',
     saveSettings: 'Save Settings',
     saving: 'Saving...',
-    githubSectionNote: 'Project home link is not confirmed; the button does not navigate yet.',
+    githubSectionNote: 'Visit the Actanara GitHub project home (opens in a new tab).',
     llmProviderList: 'LLM Provider List',
     llmProviderListNote: 'The provider dropdown currently includes only MiniMax; OpenAI-compatible, Anthropic, Gemini, and other providers will be added later.',
     cliReserved: 'CLI Reserved',
@@ -1957,6 +2007,14 @@ const OPERATOR_UI_TEXT = {
     noExternalTools: 'No externalTools settings.',
     externalToolPaths: 'External Tool Paths',
     externalToolPathsNote: 'These paths are written to settings.json externalTools and affect Dashboard reads of historical/current data for OpenClaw, Claude Code, Codex, Gemini CLI, Hermes, OpenCode, Antigravity, Cursor, and related tools.',
+    nativeMemoryTitle: 'Agent Native Memory',
+    nativeMemoryNote: 'Codex, Claude Code, instruction files, and nova-RAG ingestion are enabled by default. Actanara reads only allowlisted local memory files, and each scope can be disabled.',
+    nativeMemoryEnable: 'Include agent-native memory',
+    nativeMemoryTools: 'Allowed agents',
+    nativeMemoryInstructions: 'Also include agent instruction files',
+    nativeMemoryInstructionsNote: 'Instruction files can contain durable preferences or sensitive operational constraints. Disable this scope if they should not be searchable across agents.',
+    nativeMemoryRag: 'Allow native memory in the nova-RAG semantic index',
+    nativeMemoryRagNote: 'When disabled, native memory is limited to the local SQLite lexical index. Rebuild the RAG index after enabling semantic ingestion.',
     pipelineSettingsNote: 'These values affect pipeline child processes started after this change; already-running pipelines are not modified retroactively.',
     noStepTimeouts: 'No step timeout configuration.',
   },
@@ -6364,11 +6422,6 @@ function modalBack() {
   }
 }
 
-function openGithubTodo() {
-  const labels = operatorText();
-  openModal(labels.githubProject, '<div class="settings-note">' + escapeHtml(labels.githubTodo) + '</div>');
-}
-
 function openI18nTodo() {
   const labels = operatorText();
   openModal(labels.i18nSwitch, '<div class="settings-note">' + escapeHtml(labels.i18nTodo) + '</div>');
@@ -6380,7 +6433,7 @@ function openMobileUtilities() {
     <div class="mobile-utility-grid">
       <button type="button" class="utility-btn" data-mobile-action="settings" onclick="openSettingsModal()">${escapeHtml(labels.settingsButton)}</button>
       <button type="button" class="utility-btn" data-mobile-action="llm" onclick="openLlmProviderModal()">${escapeHtml(labels.llmButton)}</button>
-      <button type="button" class="utility-btn utility-btn-muted" data-mobile-action="github" onclick="openGithubTodo()">GitHub</button>
+      <a class="utility-btn utility-btn-muted utility-link" data-mobile-action="github" href="${ACTANARA_GITHUB_URL}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(labels.githubTitle)}" aria-label="${escapeHtml(labels.githubTitle)}">GitHub</a>
       <button type="button" class="utility-btn utility-btn-muted" data-mobile-action="language" onclick="openI18nTodo()">中/EN</button>
     </div>`);
 }
@@ -6433,7 +6486,7 @@ function isAdvancedSettingsField(input) {
   }
   if (!input.id) return false;
   const pane = input.closest('.settings-pane');
-  if (pane && ['paths', 'runtimeSources', 'pipeline', 'externalTools', 'authority'].includes(pane.dataset.pane || '')) {
+  if (pane && ['paths', 'runtimeSources', 'pipeline', 'externalTools', 'memory', 'authority'].includes(pane.dataset.pane || '')) {
     return true;
   }
   return new Set([
@@ -6567,18 +6620,21 @@ function renderSettingsModal(settings) {
   const runtimeSources = settings.runtimeSources || (authority.runtimeSources || {});
   const pipeline = settings.pipeline || (authority.pipeline || {});
   const externalTools = settings.externalTools || {};
+  const memorySearch = settings.memorySearch || {};
   const llmProvider = settings.llmProvider || {};
   const advancedTabs = showAdvanced ? `
         <button class="settings-tab" data-tab="paths" onclick="settingsTab('paths')">${escapeHtml(labels.tabPaths)}</button>
         <button class="settings-tab" data-tab="runtimeSources" onclick="settingsTab('runtimeSources')">${escapeHtml(labels.tabRuntimeSources)}</button>
         <button class="settings-tab" data-tab="pipeline" onclick="settingsTab('pipeline')">Pipeline</button>
         <button class="settings-tab" data-tab="externalTools" onclick="settingsTab('externalTools')">${escapeHtml(labels.tabExternalTools)}</button>
+        <button class="settings-tab" data-tab="memory" onclick="settingsTab('memory')">${escapeHtml(labels.tabMemory)}</button>
         <button class="settings-tab" data-tab="authority" onclick="settingsTab('authority')">Authority</button>` : '';
   const advancedPanes = showAdvanced ? `
         <div class="settings-pane" data-pane="paths">${renderPathSettings(paths, settings.runtimePath || {})}</div>
         <div class="settings-pane" data-pane="runtimeSources">${renderRuntimeSourceSettings(runtimeSources)}</div>
         <div class="settings-pane" data-pane="pipeline">${renderPipelineSettings(pipeline)}</div>
         <div class="settings-pane" data-pane="externalTools">${renderExternalToolSettings(externalTools)}</div>
+        <div class="settings-pane" data-pane="memory">${renderNativeMemorySettings(memorySearch)}</div>
         <div class="settings-pane" data-pane="authority">${renderSettingsAuthority((authority || {}).settingsAuthority || {})}</div>` : '';
   return `
     <div class="settings-grid" data-settings-bundle-form>
@@ -7893,6 +7949,35 @@ function renderExternalToolSettings(externalTools) {
     '</div>';
 }
 
+function renderNativeMemorySettings(memorySearch) {
+  const labels = operatorText();
+  const nativeMemory = memorySearch.nativeMemory || {};
+  const tools = nativeMemory.tools || {};
+  const enabled = nativeMemory.enabled !== false;
+  const disabled = enabled ? '' : 'disabled';
+  return `
+    <div class="settings-section">
+      <div class="settings-section-title">${escapeHtml(labels.nativeMemoryTitle)}</div>
+      <div class="settings-note">${escapeHtml(labels.nativeMemoryNote)}</div>
+      <label class="settings-check"><input id="setNativeMemoryEnabled" type="checkbox" ${enabled ? 'checked' : ''} onchange="syncNativeMemorySettingsState()"> ${escapeHtml(labels.nativeMemoryEnable)}</label>
+      <div class="settings-row"><label>${escapeHtml(labels.nativeMemoryTools)}</label><div>
+        <label class="settings-check"><input id="setNativeMemoryCodex" data-native-memory-dependent type="checkbox" ${tools.codex !== false ? 'checked' : ''} ${disabled}> Codex</label>
+        <label class="settings-check"><input id="setNativeMemoryClaudeCode" data-native-memory-dependent type="checkbox" ${tools.claudeCode !== false ? 'checked' : ''} ${disabled}> Claude Code</label>
+      </div></div>
+      <label class="settings-check"><input id="setNativeMemoryIncludeInstructions" data-native-memory-dependent type="checkbox" ${nativeMemory.includeInstructions !== false ? 'checked' : ''} ${disabled}> ${escapeHtml(labels.nativeMemoryInstructions)}</label>
+      <div class="settings-note">${escapeHtml(labels.nativeMemoryInstructionsNote)}</div>
+      <label class="settings-check"><input id="setNativeMemoryAllowInRag" data-native-memory-dependent type="checkbox" ${nativeMemory.allowInRag !== false ? 'checked' : ''} ${disabled}> ${escapeHtml(labels.nativeMemoryRag)}</label>
+      <div class="settings-note">${escapeHtml(labels.nativeMemoryRagNote)}</div>
+    </div>`;
+}
+
+function syncNativeMemorySettingsState() {
+  const enabled = document.getElementById('setNativeMemoryEnabled')?.checked === true;
+  document.querySelectorAll('[data-native-memory-dependent]').forEach(input => {
+    input.disabled = !enabled;
+  });
+}
+
 function renderPipelineSettings(pipeline) {
   const labels = operatorText();
   const stepTimeouts = pipeline.stepTimeouts || {};
@@ -8056,12 +8141,20 @@ function renderRagSettings(rag, status) {
   const externalPaths = Array.isArray(external.paths) ? external.paths : [];
   const externalInclude = Array.isArray(external.include) ? external.include : [];
   const externalExclude = Array.isArray(external.exclude) ? external.exclude : [];
-  queueMicrotask(() => loadRagManagedService());
+  queueMicrotask(() => {
+    loadRagManagedService();
+    loadLocalMemoryStatus();
+  });
   return `
     <div class="settings-section">
       <div class="settings-section-title">${escapeHtml(serviceLabels.startupRagServer)} · ${escapeHtml(serviceLabels.startupServicesTitle)}</div>
       <div class="settings-note">${escapeHtml(serviceLabels.startupServicesNote)}</div>
       <div id="ragManagedService" class="settings-runtime-status"><div class="wr-loading" style="padding:12px"><div class="wr-spinner"></div><span>${escapeHtml(serviceLabels.startupReading)}</span></div></div>
+    </div>
+    <div class="settings-section">
+      <div class="settings-section-title">${escapeHtml(labels.localMemoryTitle)}</div>
+      <div class="settings-note">${escapeHtml(labels.localMemoryNote)}</div>
+      <div id="localMemoryStatus" class="settings-runtime-status"><div class="wr-loading" style="padding:12px"><div class="wr-spinner"></div><span>${escapeHtml(labels.readingStatus)}</span></div></div>
     </div>
     <div class="settings-section">
       <div class="settings-section-title">${escapeHtml(labels.instantParams)}</div>
@@ -8179,7 +8272,7 @@ function renderFutureSettings(todos) {
   return `
     <div class="settings-section">
       <div class="settings-section-title">GitHub</div>
-      <div class="settings-note">${escapeHtml(labels.githubSectionNote)}</div>
+      <div class="settings-note"><a href="${ACTANARA_GITHUB_URL}" target="_blank" rel="noopener noreferrer">${escapeHtml(labels.githubSectionNote)}</a></div>
     </div>
     <div class="settings-section">
       <div class="settings-section-title">${escapeHtml(labels.i18nSwitch)}</div>
@@ -8211,6 +8304,7 @@ async function saveSettingsModal() {
     payload.runtimeSources = collectRuntimeSourceSettingsFromModal();
     payload.pipeline = collectPipelineSettingsFromModal();
     payload.externalTools = collectExternalToolSettingsFromModal();
+    payload.memorySearch = collectNativeMemorySettingsFromModal();
   }
   try {
     const bundle = {settings: payload};
@@ -8373,6 +8467,20 @@ function collectExternalToolSettingsFromModal() {
     }
   });
   return externalTools;
+}
+
+function collectNativeMemorySettingsFromModal() {
+  return {
+    nativeMemory: {
+      enabled: document.getElementById('setNativeMemoryEnabled')?.checked === true,
+      allowInRag: document.getElementById('setNativeMemoryAllowInRag')?.checked === true,
+      includeInstructions: document.getElementById('setNativeMemoryIncludeInstructions')?.checked === true,
+      tools: {
+        codex: document.getElementById('setNativeMemoryCodex')?.checked === true,
+        claudeCode: document.getElementById('setNativeMemoryClaudeCode')?.checked === true,
+      },
+    },
+  };
 }
 
 function collectPipelineSettingsFromModal() {
@@ -8645,27 +8753,107 @@ async function loadRagEval() {
   }
 }
 
+async function loadLocalMemoryStatus() {
+  const labels = ragUiText();
+  const panel = document.getElementById('localMemoryStatus');
+  if (!panel) return;
+  try {
+    const res = await fetch('/api/memory/status?probe=true');
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
+    renderLocalMemoryStatus(data);
+  } catch (e) {
+    panel.innerHTML = '<div class="fo-job-error">' + escapeHtml(labels.localMemoryStatusFailed + e.message) + '</div>';
+  }
+}
+
+function renderLocalMemoryStatus(status) {
+  const labels = ragUiText();
+  const panel = document.getElementById('localMemoryStatus');
+  if (!panel) return;
+  status = status || {};
+  const local = ((status.backends || {}).local) || {};
+  const backend = local.backend || {kind: 'local-fts', semantic: false};
+  const capabilities = local.capabilities || {};
+  const actions = status.actions || {};
+  const stateClass = local.ready ? 'ok' : 'warn';
+  const actionButtons = [
+    actions.sync
+      ? '<button type="button" class="settings-browse-btn" onclick="syncLocalMemoryIndex(false)">' + escapeHtml(labels.syncLocalMemory) + '</button>'
+      : '',
+    actions.rebuild
+      ? '<button type="button" class="settings-browse-btn secondary" onclick="syncLocalMemoryIndex(true)">' + escapeHtml(labels.rebuildLocalMemory) + '</button>'
+      : '',
+  ].filter(Boolean).join(' ');
+  const featureList = [
+    capabilities.fts5 ? 'FTS5' : '',
+    capabilities.unicode61 ? 'unicode61' : '',
+    capabilities.trigram ? 'trigram' : '',
+    capabilities.exactScan ? 'exact-scan' : '',
+  ].filter(Boolean).join(', ') || 'exact-scan';
+  panel.innerHTML =
+    '<div class="settings-runtime-line"><span class="settings-runtime-chip ' + stateClass + '">' +
+      escapeHtml(local.status || (local.ready ? 'ready' : 'missing')) + '</span> ' +
+      '<b>' + escapeHtml(labels.localMemoryBackend) + '</b> ' + escapeHtml(backend.kind || 'local-fts') +
+      ' · semantic=' + escapeHtml(String(Boolean(backend.semantic))) + '</div>' +
+    '<div class="settings-runtime-line"><b>' + escapeHtml(labels.localMemoryDocuments) + '</b> ' +
+      Number(local.documentCount || 0).toLocaleString() + ' · <b>' + escapeHtml(labels.localMemorySources) + '</b> ' +
+      Number(local.sourceCount || 0).toLocaleString() + '</div>' +
+    '<div class="settings-runtime-line"><b>' + escapeHtml(labels.localMemorySyncedAt) + '</b> ' +
+      escapeHtml(local.indexedAt || '—') + ' · <b>' + escapeHtml(labels.localMemoryCapabilities) + '</b> ' +
+      escapeHtml(featureList) + '</div>' +
+    (backend.indexPath ? '<div class="settings-runtime-line"><b>' + escapeHtml(labels.localMemoryIndex) +
+      '</b> <code>' + escapeHtml(backend.indexPath) + '</code></div>' : '') +
+    (actionButtons ? '<div class="rag-external-actions">' + actionButtons + '</div>' : '');
+}
+
+async function syncLocalMemoryIndex(rebuild) {
+  const labels = ragUiText();
+  const panel = document.getElementById('localMemoryStatus');
+  if (!panel) return;
+  panel.innerHTML = '<div class="wr-loading" style="padding:12px"><div class="wr-spinner"></div><span>' +
+    escapeHtml(rebuild ? labels.rebuildingLocalMemory : labels.syncingLocalMemory) + '</span></div>';
+  try {
+    const endpoint = rebuild ? '/api/memory/local/rebuild' : '/api/memory/local/sync';
+    const res = await fetch(endpoint, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}'});
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
+    renderLocalMemoryStatus(data.memoryStatus || {});
+  } catch (e) {
+    panel.innerHTML = '<div class="fo-job-error">' + escapeHtml(labels.localMemoryActionFailed + e.message) + '</div>';
+  }
+}
+
 async function runRagSearch() {
   const labels = ragUiText();
   const box = document.getElementById('ragSearchResults');
   const query = document.getElementById('ragSearchQuery')?.value || '';
   if (box) box.textContent = labels.searching;
   try {
-    const res = await fetch('/api/rag/search', {
+    const res = await fetch('/api/memory/search', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({query, topK: Number(document.getElementById('setRagTopK')?.value || 8)})
+      body: JSON.stringify({query, topK: Number(document.getElementById('setRagTopK')?.value || 8), mode: 'auto', caller: 'dashboard'})
     });
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const data = await res.json();
     if (data.available === false) {
-      if (box) box.innerHTML = '<div class="fo-job-error" role="alert">' + escapeHtml(labels.searchUnavailable + (data.reason || 'server unavailable')) + '</div>';
+      const unavailableBackend = data.backend || {};
+      if (box) box.innerHTML =
+        '<div class="settings-note" role="status"><b>' + escapeHtml(labels.searchBackend) + '</b> ' +
+          escapeHtml(unavailableBackend.kind || 'unavailable') + ' · semantic=' +
+          escapeHtml(String(Boolean(unavailableBackend.semantic))) + '</div>' +
+        '<div class="fo-job-error" role="alert">' +
+          escapeHtml(labels.searchUnavailable + (data.reason || 'server unavailable')) + '</div>';
       return;
     }
     const rows = (data.results || []).map(item => '<div class="settings-runtime-line"><b>' + escapeHtml(item.id || item.score || '') + '</b> ' + escapeHtml(item.textPreview || item.text || item.score || '') + '</div>').join('');
-    const degraded = data.degraded || (data.controller && data.controller.status === 'degraded');
+    const backend = data.backend || {};
+    const backendNotice = '<div class="settings-note" role="status"><b>' + escapeHtml(labels.searchBackend) + '</b> ' +
+      escapeHtml(backend.kind || 'unknown') + ' · semantic=' + escapeHtml(String(Boolean(backend.semantic))) + '</div>';
+    const degraded = data.degraded || backend.degraded || (data.controller && data.controller.status === 'degraded');
     const notice = degraded ? '<div class="settings-note" role="status">' + escapeHtml(labels.partialResults || 'Partial results') + '</div>' : '';
-    if (box) box.innerHTML = notice + (rows || '<div class="settings-note">' + escapeHtml(labels.noResults) + '</div>');
+    if (box) box.innerHTML = backendNotice + notice + (rows || '<div class="settings-note">' + escapeHtml(labels.noResults) + '</div>');
   } catch (e) {
     if (box) box.innerHTML = '<div class="fo-job-error">' + escapeHtml(labels.searchFailed) + escapeHtml(e.message) + '</div>';
   }
@@ -8891,13 +9079,16 @@ function openRagExternalSkillRegistration() {
       '<div class="settings-section-title">External Agent Memory Skill</div>' +
       '<div class="settings-note">' + escapeHtml(labels.externalSkillNote) + '</div>' +
       '<div class="settings-runtime-status">' +
-        '<div class="settings-runtime-line"><b>Contract</b> GET /api/rag/external/health · GET /api/rag/external/contract · POST /api/rag/external/search</div>' +
+        '<div class="settings-runtime-line"><b>Contract</b> GET /api/memory/external/health · GET /api/memory/external/contract · POST /api/memory/external/search</div>' +
         '<div class="settings-runtime-line"><b>Policy</b> ' + escapeHtml(labels.externalSkillPolicy) + '</div>' +
       '</div>' +
-      '<div class="settings-row"><label>' + escapeHtml(labels.confirmationPhrase) + '</label><input id="ragSkillRegistrationConfirmation" placeholder="INSTALL ACTANARA RAG SKILL"></div>' +
-      '<label class="settings-inline"><input type="checkbox" id="ragSkillRegistrationOverwrite"> ' + escapeHtml(labels.overwriteSkill) + '</label>' +
-      '<button type="button" class="wr-export-btn" onclick="loadRagExternalSkillPlan()">' + escapeHtml(labels.refreshPlan) + '</button> ' +
-      '<button type="button" class="wr-export-btn" onclick="submitRagExternalSkillRegistration()">' + escapeHtml(labels.installSkill) + '</button> ' +
+      '<div class="settings-section-title">' + escapeHtml(labels.externalSkillTargets) + '</div>' +
+      '<div class="settings-note">' + escapeHtml(labels.externalSkillTargetsNote) + '</div>' +
+      '<div id="memorySkillRegistrationTargets" class="settings-runtime-status">' + escapeHtml(labels.readingInstallPlan) + '</div>' +
+      '<div class="settings-row"><label>' + escapeHtml(labels.confirmationPhrase) + '</label><input id="ragSkillRegistrationConfirmation" placeholder="INSTALL ACTANARA MEMORY SKILL"></div>' +
+      '<label class="settings-inline"><input type="checkbox" id="ragSkillRegistrationOverwrite" onchange="loadRagExternalSkillPlan(true)"> ' + escapeHtml(labels.overwriteSkill) + '</label>' +
+      '<button type="button" class="wr-export-btn" onclick="loadRagExternalSkillPlan(true)">' + escapeHtml(labels.refreshPlan) + '</button> ' +
+      '<button type="button" class="wr-export-btn" id="memorySkillRegistrationApplyBtn" onclick="submitRagExternalSkillRegistration()">' + escapeHtml(labels.installSkill) + '</button> ' +
       '<button type="button" class="wr-export-btn secondary" onclick="loadRagExternalContractPreview()">' + escapeHtml(labels.readContract) + '</button> ' +
       '<button type="button" class="wr-export-btn secondary" onclick="openBackgroundTasksModal()">' + escapeHtml(labels.backgroundTasks) + '</button>' +
       '<div id="ragExternalSkillPreview" class="settings-runtime-status" style="margin-top:10px">' + escapeHtml(labels.readingInstallPlan) + '</div>' +
@@ -8905,22 +9096,104 @@ function openRagExternalSkillRegistration() {
   loadRagExternalSkillPlan();
 }
 
-async function loadRagExternalSkillPlan() {
+async function loadRagExternalSkillPlan(useCurrentSelection = false) {
   const labels = ragUiText();
+  const generation = ++MEMORY_SKILL_PLAN_GENERATION;
   const box = document.getElementById('ragExternalSkillPreview');
+  const targets = document.getElementById('memorySkillRegistrationTargets');
+  const currentInputs = Array.from(document.querySelectorAll('[data-memory-skill-tool]'));
+  const tools = useCurrentSelection && currentInputs.length
+    ? selectedMemorySkillRegistrationTools()
+    : null;
+  const overwrite = document.getElementById('ragSkillRegistrationOverwrite')?.checked || false;
   if (box) box.textContent = labels.readingInstallPlan;
+  if (targets) targets.textContent = labels.readingInstallPlan;
   try {
-    const res = await fetch('/api/settings/external-tools/rag-skill-registration/plan');
+    const res = tools === null
+      ? await fetch('/api/settings/external-tools/memory-skill-registration/plan')
+      : await fetch('/api/settings/external-tools/memory-skill-registration', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({dryRun: true, overwrite, tools})
+        });
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const data = await res.json();
-    const rows = (data.operations || []).map(op =>
-      '<div class="settings-runtime-line"><b>' + escapeHtml(op.tool) + '</b> ' +
-      escapeHtml(op.status) + ' · ' + escapeHtml(op.skillFile || '') + '</div>'
-    ).join('');
-    if (box) box.innerHTML = rows || '<div class="settings-note">' + escapeHtml(labels.noRegistrationTargets) + '</div>';
+    if (generation !== MEMORY_SKILL_PLAN_GENERATION) return;
+    renderMemorySkillRegistrationPlan(data);
   } catch (e) {
+    if (generation !== MEMORY_SKILL_PLAN_GENERATION) return;
     if (box) box.innerHTML = '<div class="fo-job-error">' + escapeHtml(labels.planReadFailed + e.message) + '</div>';
+    if (targets) targets.innerHTML = '<div class="fo-job-error">' + escapeHtml(labels.planReadFailed + e.message) + '</div>';
   }
+}
+
+function memorySkillToolLabel(tool) {
+  return ({
+    openclaw: 'OpenClaw',
+    claudeCode: 'Claude Code',
+    codex: 'Codex',
+    geminiCli: 'Gemini CLI',
+    hermes: 'Hermes',
+    opencode: 'OpenCode',
+    antigravity: 'Antigravity',
+    cursor: 'Cursor',
+  })[tool] || tool;
+}
+
+function renderMemorySkillRegistrationPlan(data) {
+  const labels = ragUiText();
+  const box = document.getElementById('ragExternalSkillPreview');
+  const targets = document.getElementById('memorySkillRegistrationTargets');
+  const detected = new Set(Array.isArray(data.detectedTools) ? data.detectedTools : []);
+  const supported = new Set(Array.isArray(data.supportedTools) ? data.supportedTools : []);
+  const selected = new Set(Array.isArray(data.selectedTools) ? data.selectedTools : []);
+  const candidates = Array.from(supported).filter(tool => detected.has(tool));
+  const operations = new Map((data.operations || []).map(operation => [operation.tool, operation]));
+  const targetRows = candidates.map(tool => {
+    const operation = operations.get(tool) || {};
+    const status = operation.status || labels.registrationAvailable;
+    const checked = selected.has(tool) ? ' checked' : '';
+    const path = operation.skillFile
+      ? ' · <code>' + escapeHtml(operation.skillFile) + '</code>'
+      : '';
+    return '<label class="settings-check memory-skill-target">' +
+      '<input type="checkbox" data-memory-skill-tool="' + escapeHtml(tool) + '"' + checked +
+      ' onchange="loadRagExternalSkillPlan(true)"> ' +
+      '<span><b>' + escapeHtml(memorySkillToolLabel(tool)) + '</b> · ' + escapeHtml(status) + path + '</span>' +
+      '</label>';
+  }).join('');
+  const unsupported = Array.from(detected).filter(tool => !supported.has(tool));
+  const warnings = (data.warnings || []).map(item =>
+    '<div class="settings-note">' + escapeHtml(item) + '</div>'
+  ).join('');
+  if (targets) {
+    targets.innerHTML = targetRows ||
+      '<div class="settings-note">' + escapeHtml(labels.noRegistrationTargets) + '</div>';
+  }
+  if (box) {
+    box.innerHTML =
+      (unsupported.length
+        ? '<div class="settings-note">' + escapeHtml(labels.detectedUnsupportedTools) +
+          escapeHtml(unsupported.map(memorySkillToolLabel).join(', ')) + '</div>'
+        : '') +
+      warnings +
+      '<div class="settings-runtime-line"><b>Template</b> v' +
+        escapeHtml(String(data.templateVersion || '—')) + ' · skill=' +
+        escapeHtml(data.skillId || 'actanara-rag') + '</div>';
+  }
+  const confirmation = document.getElementById('ragSkillRegistrationConfirmation');
+  if (confirmation) {
+    confirmation.placeholder = data.confirmationTextRequired || 'INSTALL ACTANARA MEMORY SKILL';
+  }
+  const applyButton = document.getElementById('memorySkillRegistrationApplyBtn');
+  if (applyButton) applyButton.disabled = candidates.length === 0;
+}
+
+function selectedMemorySkillRegistrationTools() {
+  return Array.from(document.querySelectorAll('[data-memory-skill-tool]'))
+    .filter(input => input.checked)
+    .map(input => input.dataset.memorySkillTool)
+    .filter(Boolean);
 }
 
 async function submitRagExternalSkillRegistration() {
@@ -8928,19 +9201,30 @@ async function submitRagExternalSkillRegistration() {
   const box = document.getElementById('ragExternalSkillPreview');
   const confirmationText = document.getElementById('ragSkillRegistrationConfirmation')?.value || '';
   const overwrite = document.getElementById('ragSkillRegistrationOverwrite')?.checked || false;
+  const tools = selectedMemorySkillRegistrationTools();
+  if (!tools.length) {
+    if (box) box.innerHTML = '<div class="fo-job-error">' + escapeHtml(labels.selectRegistrationTarget) + '</div>';
+    return;
+  }
   if (box) box.textContent = labels.submittingRegistration;
   try {
-    const res = await fetch('/api/settings/external-tools/rag-skill-registration', {
+    const res = await fetch('/api/settings/external-tools/memory-skill-registration', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({dryRun: false, overwrite, confirmationText})
+      body: JSON.stringify({dryRun: false, overwrite, confirmationText, tools})
     });
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
       throw new Error(err.error || ('HTTP ' + res.status));
     }
     const data = await res.json();
-    if (box) box.innerHTML = '<div class="settings-note">' + escapeHtml(labels.registrationComplete + (data.results || []).length + ' target(s)') + '</div>';
+    const rows = (data.results || []).map(result =>
+      '<div class="settings-runtime-line"><b>' + escapeHtml(memorySkillToolLabel(result.tool)) +
+      '</b> ' + escapeHtml(result.result || result.status || 'completed') + '</div>'
+    ).join('');
+    if (box) box.innerHTML =
+      '<div class="settings-note">' + escapeHtml(labels.registrationComplete + (data.results || []).length + ' target(s)') + '</div>' +
+      rows;
     await refreshBackgroundTaskButton();
   } catch (e) {
     if (box) box.innerHTML = '<div class="fo-job-error">' + escapeHtml(labels.registrationFailed + e.message) + '</div>';
@@ -8952,7 +9236,7 @@ async function loadRagExternalContractPreview() {
   const box = document.getElementById('ragExternalSkillPreview');
   if (box) box.textContent = labels.readingContract;
   try {
-    const res = await fetch('/api/rag/external/contract');
+    const res = await fetch('/api/memory/contract');
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const data = await res.json();
     if (box) box.innerHTML = '<pre style="white-space:pre-wrap;margin:0">' + escapeHtml(JSON.stringify(data, null, 2)) + '</pre>';
@@ -9228,24 +9512,30 @@ async function runRagPageSearch() {
   }
   if (box) box.innerHTML = '<div class="settings-note">' + escapeHtml(t.searching) + '</div>';
   try {
-    const payload = {query, topK, includeGovernance: true};
+    const payload = {query, topK, includeGovernance: true, mode: 'auto', caller: 'dashboard'};
     if (project.trim()) payload.project = project.trim();
     if (sourceSets.length) payload.sourceSets = sourceSets;
     if (lifecycle.length) payload.lifecycle = lifecycle;
-    const res = await fetch('/api/rag/search', {
+    const res = await fetch('/api/memory/search', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify(payload)
     });
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const data = await res.json();
+    const backend = data.backend || {};
+    const backendNotice = '<div class="settings-note" role="status"><b>' +
+      escapeHtml(t.searchBackend) + '</b> ' + escapeHtml(backend.kind || 'unknown') +
+      ' · semantic=' + escapeHtml(String(Boolean(backend.semantic))) + '</div>';
     if (data.available === false) {
-      if (box) box.innerHTML = '<div class="fo-job-error">' + escapeHtml(t.searchUnavailable + (data.reason || 'server unavailable')) + '</div>';
+      if (box) box.innerHTML = backendNotice + '<div class="fo-job-error">' +
+        escapeHtml(t.searchUnavailable + (data.reason || 'server unavailable')) + '</div>';
       await loadRagSearchPage();
       return;
     }
     const rows = (data.results || []).map(renderRagSearchResult).join('');
-    if (box) box.innerHTML = rows || '<div class="settings-note">' + escapeHtml(t.noResults) + '</div>';
+    if (box) box.innerHTML = backendNotice +
+      (rows || '<div class="settings-note">' + escapeHtml(t.noResults) + '</div>');
   } catch (e) {
     if (box) box.innerHTML = '<div class="fo-job-error">' + escapeHtml(t.searchFailed + e.message) + '</div>';
   }

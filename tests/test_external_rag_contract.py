@@ -22,6 +22,7 @@ from dashboard.app.services import settings as dashboard_settings
 FASTAPI_AVAILABLE = importlib.util.find_spec("fastapi") is not None
 if FASTAPI_AVAILABLE:
     from dashboard.app.routers import settings as settings_router
+    from starlette.requests import Request
 else:  # pragma: no cover - exercised on lean test interpreters
     settings_router = None
 
@@ -30,6 +31,23 @@ if SERVER_DEPS_AVAILABLE:
     from agentic_rag import embedding_server
 else:  # pragma: no cover - exercised on lean test interpreters
     embedding_server = None
+
+
+def _loopback_request() -> "Request":
+    return Request(
+        {
+            "type": "http",
+            "http_version": "1.1",
+            "method": "GET",
+            "scheme": "http",
+            "path": "/api/rag/external/health",
+            "raw_path": b"/api/rag/external/health",
+            "query_string": b"",
+            "headers": [(b"host", b"127.0.0.1:3036")],
+            "client": ("127.0.0.1", 50000),
+            "server": ("127.0.0.1", 3036),
+        }
+    )
 
 
 class ExternalRagContractTests(unittest.TestCase):
@@ -100,9 +118,14 @@ class ExternalRagContractTests(unittest.TestCase):
                 return_value={"available": True, "results": []},
             ),
         ):
-            contract = asyncio.run(settings_router.api_rag_external_contract())
-            health = asyncio.run(settings_router.api_rag_external_health(probe=False))
-            search = asyncio.run(settings_router.api_rag_external_search({"query": "prior work"}))
+            contract = asyncio.run(settings_router.api_rag_external_contract(_loopback_request()))
+            health = asyncio.run(settings_router.api_rag_external_health(_loopback_request(), probe=False))
+            search = asyncio.run(
+                settings_router.api_rag_external_search(
+                    _loopback_request(),
+                    {"query": "prior work"},
+                )
+            )
 
         envelope_contracts = (
             contract,
@@ -184,7 +207,7 @@ class ExternalRagContractTests(unittest.TestCase):
     @unittest.skipUnless(FASTAPI_AVAILABLE, "Dashboard router dependencies are unavailable")
     def test_dashboard_external_search_value_error_returns_stable_schema(self):
         assert settings_router is not None
-        response = asyncio.run(settings_router.api_rag_external_search({}))
+        response = asyncio.run(settings_router.api_rag_external_search(_loopback_request(), {}))
         payload = json.loads(response.body.decode("utf-8"))
 
         self.assertEqual(response.status_code, 400)

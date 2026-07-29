@@ -68,6 +68,125 @@ def search_memory(
     timeout_seconds: float = DEFAULT_SEARCH_TIMEOUT_SECONDS,
     filters: dict[str, Any] | None = None,
     budget: ExternalSearchBudget | None = None,
+    mode: str = "rag",
+    caller: str | None = None,
+    paths: Any | None = None,
+    budget_call: int | None = None,
+    budget_max_calls: int | None = None,
+) -> dict[str, Any]:
+    """Search memory through the selected backend.
+
+    ``auto`` prefers an enabled nova-RAG service and falls back to the local
+    lexical index when that service is disabled or unavailable. ``rag`` is a
+    strict compatibility path and never falls back. ``local`` bypasses the
+    Dashboard and RAG service entirely.
+    """
+    normalized_query = str(query or "").strip()
+    if not normalized_query:
+        raise ValueError("query is required")
+    selected_mode = str(mode or "rag").strip().lower()
+    if selected_mode not in {"auto", "rag", "local"}:
+        raise ValueError("mode must be one of: auto, rag, local")
+    bounded_top_k = max(1, min(int(top_k or 5), 20))
+
+    if selected_mode == "local":
+        return _search_local_memory(
+            normalized_query,
+            top_k=bounded_top_k,
+            filters=filters,
+            caller=caller,
+            paths=paths,
+        )
+
+    if selected_mode == "rag":
+        return _annotate_rag_response(
+            _search_rag_memory(
+                normalized_query,
+                top_k=bounded_top_k,
+                dashboard_url=dashboard_url,
+                timeout_seconds=timeout_seconds,
+                filters=filters,
+                budget=budget,
+                caller=caller,
+                budget_call=budget_call,
+                budget_max_calls=budget_max_calls,
+            )
+        )
+
+    memory_enabled, backend_policy = _memory_backend_policy(paths)
+    if not memory_enabled:
+        return _search_local_memory(
+            normalized_query,
+            top_k=bounded_top_k,
+            filters=filters,
+            caller=caller,
+            paths=paths,
+        )
+    if backend_policy == "local":
+        return _search_local_memory(
+            normalized_query,
+            top_k=bounded_top_k,
+            filters=filters,
+            caller=caller,
+            paths=paths,
+        )
+    if backend_policy == "rag":
+        return _annotate_rag_response(
+            _search_rag_memory(
+                normalized_query,
+                top_k=bounded_top_k,
+                dashboard_url=dashboard_url,
+                timeout_seconds=timeout_seconds,
+                filters=filters,
+                budget=budget,
+                caller=caller,
+                budget_call=budget_call,
+                budget_max_calls=budget_max_calls,
+            )
+        )
+
+    rag_enabled, disabled_reason = _rag_enabled(paths)
+    if rag_enabled:
+        rag_result = _annotate_rag_response(
+            _search_rag_memory(
+                normalized_query,
+                top_k=bounded_top_k,
+                dashboard_url=dashboard_url,
+                timeout_seconds=timeout_seconds,
+                filters=filters,
+                budget=budget,
+                caller=caller,
+                budget_call=budget_call,
+                budget_max_calls=budget_max_calls,
+            )
+        )
+        if rag_result.get("available", True):
+            return rag_result
+        fallback_from = str(rag_result.get("reason") or "rag-external-unavailable")
+    else:
+        fallback_from = disabled_reason or "nova-rag-disabled"
+
+    local_result = _search_local_memory(
+        normalized_query,
+        top_k=bounded_top_k,
+        filters=filters,
+        caller=caller,
+        paths=paths,
+    )
+    return _annotate_fallback(local_result, fallback_from=fallback_from)
+
+
+def _search_rag_memory(
+    query: str,
+    *,
+    top_k: int = 5,
+    dashboard_url: str | None = None,
+    timeout_seconds: float = DEFAULT_SEARCH_TIMEOUT_SECONDS,
+    filters: dict[str, Any] | None = None,
+    budget: ExternalSearchBudget | None = None,
+    caller: str | None = None,
+    budget_call: int | None = None,
+    budget_max_calls: int | None = None,
 ) -> dict[str, Any]:
     """Search nova-RAG memory through the external read-only facade."""
     normalized_query = str(query or "").strip()
@@ -92,11 +211,17 @@ def search_memory(
         "query": normalized_query,
         "topK": max(1, min(int(top_k or 5), 20)),
         "remainingBudgetMs": reservation["remainingBudgetMs"],
-        "budgetCall": reservation["call"],
-        "budgetMaxCalls": reservation["maxCalls"],
+        "budgetCall": budget_call if budget_call is not None else reservation["call"],
+        "budgetMaxCalls": (
+            budget_max_calls
+            if budget_max_calls is not None
+            else reservation["maxCalls"]
+        ),
     }
     if filters:
         payload.update({key: value for key, value in filters.items() if value not in (None, "", [])})
+    if str(caller or "").strip():
+        payload["caller"] = str(caller).strip()
     base_url = str(dashboard_url or _active_runtime_dashboard_url()).rstrip("/")
     request = urllib.request.Request(
         f"{base_url}/api/rag/external/search",
@@ -180,20 +305,163 @@ def search_memory(
         )
         result["budgetTelemetry"] = shared_budget.telemetry()
         return result
+    if type(parsed.get("available")) is not bool or not isinstance(parsed.get("results"), list):
+        result = normalize_memory_response(
+            {
+                "available": False,
+                "reason": "rag-external-invalid-schema",
+                "error": "RAG external search returned invalid available/results fields",
+                "results": [],
+            },
+            query=normalized_query,
+            top_k=payload["topK"],
+        )
+        result["budgetTelemetry"] = shared_budget.telemetry()
+        return result
     result = normalize_memory_response(parsed, query=normalized_query, top_k=payload["topK"])
     result["budgetTelemetry"] = shared_budget.telemetry()
     return result
+
+
+def _rag_enabled(paths: Any | None) -> tuple[bool, str | None]:
+    try:
+        from agentic_rag.rag_settings import rag_product_disabled_reason, resolve_rag_settings
+
+        settings = resolve_rag_settings(paths)
+        reason = rag_product_disabled_reason(settings)
+        return reason is None, reason
+    except (ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
+        return False, f"nova-rag-settings-unavailable:{exc.__class__.__name__}"
+
+
+def _memory_backend_policy(paths: Any | None) -> tuple[bool, str]:
+    try:
+        from .settings import resolve_memory_search_settings
+
+        settings = resolve_memory_search_settings(paths)
+        policy = str(settings.get("backendPolicy") or "auto")
+        return settings.get("enabled") is True, policy if policy in {"auto", "rag", "local"} else "auto"
+    except (ImportError, OSError, RuntimeError, TypeError, ValueError):
+        return True, "auto"
+
+
+def _search_local_memory(
+    query: str,
+    *,
+    top_k: int,
+    filters: dict[str, Any] | None,
+    caller: str | None,
+    paths: Any | None,
+) -> dict[str, Any]:
+    try:
+        from .local_memory_search import search_local_memory
+
+        result = search_local_memory(
+            query,
+            top_k=top_k,
+            filters=filters,
+            caller=caller,
+            paths=paths,
+        )
+    except (ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
+        result = {
+            "available": False,
+            "reason": f"local-memory-unavailable:{exc.__class__.__name__}",
+            "error": str(exc),
+            "results": [],
+            "backend": {
+                "kind": "unavailable",
+                "semantic": False,
+                "degraded": True,
+                "fallbackFrom": None,
+            },
+            "capabilities": {
+                "lexical": False,
+                "semantic": False,
+                "metadataFilters": False,
+                "citations": False,
+            },
+        }
+    normalized = normalize_memory_response(result, query=query, top_k=top_k)
+    backend = normalized.get("backend") if isinstance(normalized.get("backend"), dict) else {}
+    backend = {
+        "kind": "local-fts" if normalized.get("available", True) else "unavailable",
+        "semantic": False,
+        "degraded": True,
+        "fallbackFrom": None,
+        **backend,
+    }
+    normalized["backend"] = backend
+    capabilities = (
+        normalized.get("capabilities")
+        if isinstance(normalized.get("capabilities"), dict)
+        else {}
+    )
+    normalized["capabilities"] = {
+        "lexical": bool(normalized.get("available", True)),
+        "semantic": False,
+        "metadataFilters": bool(normalized.get("available", True)),
+        "citations": bool(normalized.get("available", True)),
+        **capabilities,
+    }
+    normalized["fallbackFrom"] = backend.get("fallbackFrom")
+    return normalized
+
+
+def _annotate_rag_response(result: dict[str, Any]) -> dict[str, Any]:
+    annotated = normalize_memory_response(result)
+    backend = annotated.get("backend") if isinstance(annotated.get("backend"), dict) else {}
+    annotated["backend"] = {
+        **backend,
+        "kind": "agentic-rag",
+        "semantic": True,
+        "degraded": not bool(annotated.get("available", True)),
+        "fallbackFrom": None,
+    }
+    capabilities = (
+        annotated.get("capabilities")
+        if isinstance(annotated.get("capabilities"), dict)
+        else {}
+    )
+    annotated["capabilities"] = {
+        **capabilities,
+        "lexical": True,
+        "semantic": True,
+        "metadataFilters": True,
+        "citations": True,
+        "agenticPlanning": True,
+        "multiPass": True,
+    }
+    annotated.setdefault("retrievalMode", "semantic")
+    annotated["fallbackFrom"] = None
+    return annotated
+
+
+def _annotate_fallback(
+    result: dict[str, Any],
+    *,
+    fallback_from: str,
+) -> dict[str, Any]:
+    annotated = normalize_memory_response(result)
+    backend = annotated.get("backend") if isinstance(annotated.get("backend"), dict) else {}
+    annotated["backend"] = {
+        **backend,
+        "degraded": True,
+        "fallbackFrom": fallback_from,
+    }
+    annotated["fallbackFrom"] = fallback_from
+    return annotated
 
 
 def normalize_memory_response(result: dict[str, Any] | None, *, query: str = "", top_k: int = 5) -> dict[str, Any]:
     """Preserve the external-agent evidence schema for CLI consumers."""
     response = dict(result) if isinstance(result, dict) else {"results": []}
     results = response.get("results") if isinstance(response.get("results"), list) else []
-    available = bool(response.get("available", True))
+    available = response.get("available") if type(response.get("available")) is bool else False
     reason = str(response.get("reason") or "")
     response.setdefault("schemaVersion", 2)
-    response.setdefault("available", available)
-    response.setdefault("results", results)
+    response["available"] = available
+    response["results"] = results
     response.setdefault(
         "queryPlan",
         {
@@ -292,15 +560,15 @@ def normalize_memory_response(result: dict[str, Any] | None, *, query: str = "",
 
 
 def _active_runtime_dashboard_url() -> str:
-    """Resolve the active Dashboard URL, retaining the product default as fallback."""
+    """Resolve the active Dashboard's loopback URL for anonymous local access."""
     try:
         from .paths import load_paths
         from .settings import resolve_dashboard_settings
 
         dashboard = resolve_dashboard_settings(load_paths())
-        candidate = str(dashboard.get("publicBaseUrl") or "").strip()
-        if candidate.startswith(("http://", "https://")):
-            return candidate.rstrip("/")
+        port = int(dashboard.get("port") or 3036)
+        if 1 <= port <= 65535:
+            return f"http://127.0.0.1:{port}"
     except Exception:
         pass
     return DEFAULT_DASHBOARD_URL

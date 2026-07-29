@@ -25,6 +25,10 @@ actanara config keys
 actanara config get general.timezone
 actanara config set general.timezone Asia/Hong_Kong
 actanara search "deployment issue" --top-k 5 --json
+actanara search "deployment issue" --mode local --json
+actanara memory status
+actanara memory sync
+actanara memory rebuild
 actanara task
 actanara pipeline [YYMMDD|YYYY-MM-DD]
 actanara rag-update --dry-run
@@ -34,6 +38,38 @@ actanara update --dry-run
 
 The default no-argument command prints this product command guide. README and
 new-user docs should prefer these commands.
+
+## Memory Search Boundary
+
+`actanara search` defaults to `--mode auto`. Auto mode prefers an enabled,
+available `nova-RAG` backend and falls back to the local SQLite full-text
+index when RAG is disabled or unavailable. If the index cannot be prepared, a
+bounded local scan is the final fallback.
+
+Backend selection is explicit in machine-readable output:
+
+- `backend.kind=agentic-rag` and `backend.semantic=true` identify semantic RAG.
+- `backend.kind=local-fts` or `backend.kind=bounded-scan`, together with
+  `backend.semantic=false`, identify lexical retrieval.
+- Local lexical matches are evidence, not semantic equivalence. Callers should
+  prefer exact entities, IDs, dates, file names, and error strings and must not
+  claim paraphrase coverage from a lexical result.
+
+Use `--mode rag` when RAG is a hard requirement and `--mode local` when the
+request must remain on the local lexical path. `actanara rag search-memory`
+is the strict RAG compatibility command and never silently switches to local
+retrieval.
+
+The `actanara memory` group manages only the disposable local sidecar:
+
+- `actanara memory status` is read-only.
+- `actanara memory sync` incrementally refreshes changed sources.
+- `actanara memory rebuild` replaces the sidecar and restores its prior copy
+  if rebuilding fails.
+
+These commands do not rebuild, promote, or roll back a `nova-RAG` index. See
+[Memory Search and Local Recall](memory-search.md) for routing, Skill,
+native-memory, and API boundaries.
 
 ## Guarded Maintenance
 
@@ -61,8 +97,10 @@ operator debugging, but they are not the primary product surface:
 - `actanara secrets ...`
 - `actanara rag search-memory ...`
 
-`actanara rag search-memory` is a compatibility alias for the read-only
-Dashboard RAG facade. Product docs should prefer `actanara search ...`.
+`actanara rag search-memory` is a strict compatibility alias for the read-only
+Dashboard RAG facade. It never uses the local fallback. Product docs should
+prefer `actanara search ...`; use `actanara search ... --mode rag` when the
+new product surface must also require RAG.
 
 ## Scheduler and Service Boundary
 

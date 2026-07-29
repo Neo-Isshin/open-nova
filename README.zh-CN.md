@@ -45,7 +45,7 @@ Actanara 打通这些壁垒：让 Claude Code 完成的工作能被 Codex 找到
 
 | | 结果 |
 | :--- | :--- |
-| **跨 Agent 共享记忆** | 受限的只读检索边界，让一个 Runtime 能找到并复用另一个 Runtime 已完成的工作。 |
+| **跨 Agent 共享记忆** | 受限的只读检索边界，让一个 Runtime 能找到并复用另一个 Runtime 已完成的工作。检索会优先使用已就绪的 `nova-RAG`，不可用时仍保留本地词法 fallback。 |
 | **真实发生过的工作图谱** | `Nova-Task` 从对话、文件变更和工具结果中提取任务、状态与证据，而不是只依赖手写工单。 |
 | **自动生成的工作叙事** | 日报、周报和月报，把零散 Session 变成可回顾的进展、决策与经验。 |
 | **本地事实来源** | Session、用量、生成资产和任务证据保存在你掌控的本地存储中，集成边界清晰可见。 |
@@ -56,7 +56,7 @@ Actanara 打通这些壁垒：让 Claude Code 完成的工作能被 Codex 找到
 - **本地优先、边界清晰**：Actanara 只读取已配置的工具位置，把数据写入自己的 Runtime Home，不改写外部 Runtime 的历史，也不接管其执行。
 - **模型成本友好**：结构化提示词、明确 Schema 和可控编排，让轻量模型也能产出可用结果，同时不锁定单一 Provider。
 - **集成由用户控制**：工具 Skill、外部 Runtime 定义和关键设置都可查看、可编辑、可审计。
-- **受保护的 Agentic RAG**：`nova-RAG` 通过查询评估、候选提升、召回校准和安全回滚管理检索质量，只向外部 Runtime 暴露受限的只读合约。
+- **受保护的检索**：`nova-RAG` 通过查询评估、候选提升、召回校准和安全回滚管理语义检索质量；未部署 RAG 时，Memory Search 仍可通过质量较低的本地词法索引工作。两种后端都只向外部 Runtime 暴露受限的只读检索。
 
 > 本文中的 **Agent Runtime** 指拥有独立会话、日志、记忆和执行上下文的 AI 工具环境，例如 Codex、Claude Code、Gemini CLI、OpenClaw、Hermes、OpenCode、Antigravity 和 Cursor。
 
@@ -179,7 +179,10 @@ Foundation 本地事实层
         ↓
 Base Pipeline · Nova-Task · Dashboard
         ↓
-nova-RAG（可选）→ 外部 Runtime 只读检索
+Memory Search → 本地词法索引
+        └────→ nova-RAG（可选语义后端）
+        ↓
+外部 Runtime 只读检索
 ```
 
 | 系统 | 核心职责 |
@@ -188,6 +191,7 @@ nova-RAG（可选）→ 外部 Runtime 只读检索
 | **`Base Pipeline`** | 从 Runtime 活动中生成日记、技术进展、学习记录和任务总结。 |
 | **`Dashboard`** | 统一呈现日记、AI 资产、Token 用量、设置、后台任务和任务看板。 |
 | **`Nova-Task`** | 根据真实工作证据维护可审阅的任务图谱。 |
+| **`Memory Search`** | 将只读记忆检索路由到已就绪的 `nova-RAG`；语义检索不可用时，切换到本地 SQLite FTS/受限扫描 fallback。 |
 | **`nova-RAG`** | 可选的本地或云端 Embedding 检索子系统，提供受保护的索引生命周期与外部只读检索。 |
 | **归因解析器** | 识别 Runtime、会话、工作区、定时任务和执行证据，包括从项目目录外启动的工作。 |
 
@@ -205,7 +209,7 @@ nova-RAG（可选）→ 外部 Runtime 只读检索
 
 ## 📊 Dashboard、截图与交互 Demo
 
-Dashboard 是 Actanara 的主要操作界面：每日/每周/每月日记、实时概览与 Token 用量、AI 资产指标、Foundation 操作与数据修复、后台任务和消息、LLM Provider 与调度设置、Nova-Task 任务看板，以及启用 RAG 后的语义检索视图。
+Dashboard 是 Actanara 的主要操作界面：每日/每周/每月日记、实时概览与 Token 用量、AI 资产指标、Foundation 操作与数据修复、后台任务和消息、LLM Provider 与调度设置、Memory Search 状态、Nova-Task 任务看板，以及启用 RAG 后的语义检索视图。
 
 ### 🖼️ 真实 Dashboard 截图
 
@@ -277,8 +281,17 @@ Dashboard 是 Actanara 的主要操作界面：每日/每周/每月日记、实�
 ### 常用命令
 
 ```bash
-# 在 nova-RAG 中搜索本地记忆（自动化脚本用 --json 并检查 available 字段）
+# 自动搜索记忆：优先使用已就绪的 nova-RAG，否则使用本地词法 fallback
 actanara search "deployment issue" --top-k 5
+
+# 强制使用指定后端
+actanara search "deployment issue" --mode rag --json
+actanara search "deployment issue" --mode local --json
+
+# 查看或刷新可丢弃、可重建的本地搜索索引
+actanara memory status
+actanara memory sync
+actanara memory rebuild
 
 # 手动运行每日 Pipeline（默认处理前一个日历日；已生成需 --force 才会重建）
 actanara pipeline
@@ -307,9 +320,19 @@ Runbook 使用需明确确认的 repair；repair 不会接管或删除用户自�
 
 在自动维护模式下，`Nova-Task` 可以识别层级、更新状态、挂载子任务并优化任务树：影响较大的一级节点保留人工审阅，常规更新按规则自动处理，人类随时可以接管。导入 RFC、PRD 或 Roadmap 后，Actanara 还能调用 LLM 将其拆解为可迭代的任务树。详见<a href="docs/nova-task-work-graph-reconciliation.md">Nova-Task 工作图谱对账</a>。
 
+## 🔎 Memory Search：未部署 RAG 也能检索
+
+`actanara search` 默认使用 `--mode auto`。语义服务已启用且可用时，它使用 `nova-RAG`；否则切换到增量更新的本地 SQLite 全文索引，必要时再使用受限扫描作为最后的本地路径。Fallback 是词法检索，不是语义检索：名称、ID、日期、报错原文和文件名等精确词效果更好，改写或近义表达可能漏检。使用 `--mode rag` 可强制 Agentic RAG，使用 `--mode local` 可强制本地检索；旧的 `actanara rag search-memory` 仍作为严格 RAG 兼容命令保留。
+
+安装器只管理一份动态、只读的 Memory Search Skill，而不是分别生成 RAG 与非 RAG Skill。安装时对 RAG 选择 **Not Now** 也不妨碍注册：只有同时满足“本机已检测、用户明确选择、当前支持 Skill 目标”的工具才会写入 Skill。同一份 Skill 会读取响应中的 `backend` 元数据，再选择语义或词法检索流程。
+
+新 Runtime 默认收录 Codex 与 Claude Code 自身管理的记忆，并默认包含 allowlist 内的指令文件；启用 RAG 时也默认允许它们进入 `nova-RAG`。每个范围仍可独立关闭，升级时会保留旧 Runtime 中显式写入的 `false`。适配器只读取 allowlist 中的 Markdown 记忆入口，不会检查 Cursor 的私有 SQLite 数据库。
+
+通用外部合约 `/api/memory/external/*` 只读且仅允许 loopback。命令、配置示例、响应语义、原生记忆边界与故障排查见<a href="docs/memory-search.md">Memory Search 与本地 Recall（English）</a>。
+
 ## 🤖 nova-RAG：共享记忆与只读边界
 
-`nova-RAG` 是 Actanara 的可选检索子系统，支持本地或云端 Embedding。它向外部 Agent Runtime 提供**只读**的查询能力——可以检索你的工作记忆，但不能写入记忆、修改索引、更改设置或控制服务生命周期。
+`nova-RAG` 是 Actanara 的可选语义检索子系统，支持本地或云端 Embedding。被 Memory Search 选中后，它向外部 Agent Runtime 提供**只读**的查询能力——可以检索你的工作记忆，但不能写入记忆、修改索引、更改设置或控制服务生命周期。
 
 检索质量在两层管理：服务端做确定性、baseline-first 的自适应检索；只有当返回的证据 weak/ambiguous 时，才让外部 Runtime 用自己的 LLM 进一步反思。`nova-RAG` 同时通过查询评估、候选提升、受保护的索引生命周期和安全回滚管理召回质量。完整的外部只读 API、请求结构与错误语义见<a href="docs/rag-external-agent-contract.md">nova-RAG 外部 Agent Runtime 合约</a>。
 
@@ -320,6 +343,7 @@ Runbook 使用需明确确认的 repair；repair 不会接管或删除用户自�
 - **外部 Provider 边界**：配置外部 LLM 或 Embedding 时，相关内容会按所选 Endpoint 与 Provider 政策发送。
 - **输入即输出**：若原始日志或材料中已含密钥或敏感信息，生成的日记、报告与索引可能忠实保留它们。
 - **非侵入边界**：Actanara 不改写受支持 Runtime 的历史数据、也不接管其执行；它只创建自己的 Runtime、CLI shim、可选 Skill 和托管服务。
+- **外部记忆边界**：匿名通用接口 `/api/memory/external/*` 要求请求端与 Host 都是 loopback；Agent Runtime 原生记忆只读取文档列出的 allowlist 文件，并可按 Runtime、工具、指令文件或 RAG 收录范围分别关闭。
 
 ## 📐 开发、测试与可复现发布
 
@@ -374,6 +398,7 @@ python -B -m tools.release.build_release \
 - ⚙️ <a href="docs/local-operations-runbook.zh-CN.md"><strong>中文本地操作 Runbook</strong></a>
 - 📖 <a href="docs/new-user-onboarding-runbook.zh-CN.md"><strong>新用户安装手册</strong></a>
 - 🧭 <a href="docs/cli-boundary.md">CLI 产品边界（English）</a>
+- 🔎 <a href="docs/memory-search.md">Memory Search 与本地 Recall（English）</a>
 
 ### 集成与产品设计
 

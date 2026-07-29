@@ -14,6 +14,7 @@ sys.path.insert(0, str(ROOT / "src" / "dashboard"))
 from app.services import external_rag_skill_registration as registration
 from app.services.external_rag_skill_registration import (
     CONFIRMATION_TEXT,
+    MEMORY_CONFIRMATION_TEXT,
     SKILL_TEMPLATE_VERSION,
     list_rag_skill_registration_jobs,
     plan_rag_skill_registration,
@@ -39,6 +40,12 @@ def _older_managed_content(tool: str) -> str:
 
 
 class ExternalRagSkillRegistrationTests(unittest.TestCase):
+    def setUp(self):
+        super().setUp()
+        patcher = patch.object(registration, "detected_external_tool_ids", return_value=("codex",))
+        self.detected_tools = patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_dry_run_uses_configured_skill_root_without_writing(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -82,21 +89,27 @@ class ExternalRagSkillRegistrationTests(unittest.TestCase):
             self.assertIn("actanara-managed-skill", text)
             self.assertIn(f"template-version={SKILL_TEMPLATE_VERSION}", text)
             self.assertTrue(registration._managed_marker(text)["verified"])
-            self.assertIn("auxiliary memory system", text)
+            self.assertIn("auxiliary memory skill", text)
             self.assertIn("current conversation, user-provided material, and local authoritative files", text)
             self.assertIn("host Agent Runtime's built-in or connected memory/history retrieval", text)
-            self.assertIn("nova-RAG only when the preceding sources", text)
-            self.assertIn("Do not call nova-RAG merely because a question concerns Actanara", text)
-            self.assertIn("If the user explicitly asks you to query nova-RAG", text)
+            self.assertIn("Actanara only when the preceding sources", text)
+            self.assertIn("Do not call Actanara merely because a question concerns Actanara", text)
+            self.assertIn("If the user explicitly asks you to query Actanara memory or nova-RAG", text)
             self.assertNotIn("Codex", text)
             self.assertIn("Recommended workflow", text)
-            self.assertIn("If nova-RAG is needed", text)
-            self.assertIn('actanara search "<query>" --top-k 8 --json', text)
+            self.assertIn("backend.kind", text)
+            self.assertIn("backend.semantic", text)
+            self.assertIn("Local lexical fallback protocol", text)
+            self.assertIn("not semantic equivalence", text)
+            self.assertIn("Stop after two total lexical calls", text)
+            self.assertIn('actanara search "<query>" --caller codex --top-k 8 --json', text)
             self.assertIn("actanara rag search-memory", text)
+            self.assertIn("GET /api/memory/external/contract", text)
+            self.assertIn("POST /api/memory/external/search", text)
             self.assertIn("GET /api/rag/external/contract", text)
             self.assertIn("POST /api/rag/external/search", text)
             self.assertIn("Never call mutation endpoints", text)
-            self.assertIn("Read-only multi-pass recall protocol", text)
+            self.assertIn("Read-only semantic/RAG multi-pass recall protocol", text)
             self.assertIn("Treat the first search as a candidate recall", text)
             self.assertIn("Exact pass", text)
             self.assertIn("Rewrite pass", text)
@@ -107,6 +120,8 @@ class ExternalRagSkillRegistrationTests(unittest.TestCase):
             self.assertNotIn("up to three additional read-only searches", text)
             self.assertIn("90-second total wall-clock budget", text)
             self.assertIn("remainingBudgetMs", text)
+            self.assertIn("budgetCall", text)
+            self.assertIn("budgetMaxCalls", text)
             self.assertIn("running_after_timeout|running_after_cancel", text)
             self.assertIn("caps one search at 60 seconds", text)
             self.assertIn("choose exactly one best next action", text)
@@ -175,12 +190,18 @@ class ExternalRagSkillRegistrationTests(unittest.TestCase):
             existing.parent.mkdir(parents=True)
             old_content = _older_managed_content("codex")
             existing.write_text(old_content, encoding="utf-8")
+            outside = root / "outside-secret.txt"
+            outside.write_text("must not be copied", encoding="utf-8")
+            try:
+                (existing.parent / "unmanaged-link").symlink_to(outside)
+            except (OSError, NotImplementedError):
+                pass
             write_settings({"externalTools": {"codex": {"skillsRoot": str(codex_skills)}}}, paths)
 
             plan = plan_rag_skill_registration({"tools": ["codex"]}, paths=paths)
             self.assertEqual(plan["operations"][0]["status"], "upgrade")
             self.assertTrue(plan["operations"][0]["managed"])
-            self.assertEqual(plan["operations"][0]["installedTemplateVersion"], 0)
+            self.assertEqual(plan["operations"][0]["installedTemplateVersion"], 1)
             self.assertEqual(len(plan["willWrite"]), 1)
 
             with patch.dict("os.environ", {"ACTANARA_HOME": str(paths.home)}, clear=False):
@@ -189,13 +210,14 @@ class ExternalRagSkillRegistrationTests(unittest.TestCase):
                 )
 
             self.assertEqual(result["results"][0]["result"], "upgraded")
-            self.assertEqual(result["results"][0]["previousInstalledTemplateVersion"], 0)
+            self.assertEqual(result["results"][0]["previousInstalledTemplateVersion"], 1)
             self.assertEqual(result["results"][0]["installedTemplateVersion"], SKILL_TEMPLATE_VERSION)
             self.assertFalse(result["results"][0]["upgradeAvailable"])
             self.assertEqual(existing.read_text(encoding="utf-8"), registration._skill_content("codex"))
             backups = list((paths.state_dir / "backups" / "rag-skill-registration").glob("*/codex/SKILL.md"))
             self.assertEqual(len(backups), 1)
             self.assertEqual(backups[0].read_text(encoding="utf-8"), old_content)
+            self.assertFalse((backups[0].parent / "unmanaged-link").exists())
 
     def test_modified_managed_skill_is_preserved(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -238,6 +260,21 @@ class ExternalRagSkillRegistrationTests(unittest.TestCase):
             self.assertEqual(existing.read_text(encoding="utf-8"), customized)
             self.assertFalse((paths.state_dir / "backups" / "rag-skill-registration").exists())
 
+    def test_stale_plan_does_not_write_after_tool_is_no_longer_detected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = initialize_home(root / "Actanara", legacy_diary_root=root / "Diary")
+            codex_skills = root / "codex-skills"
+            write_settings({"externalTools": {"codex": {"skillsRoot": str(codex_skills)}}}, paths)
+
+            operation = plan_rag_skill_registration({"tools": ["codex"]}, paths=paths)["operations"][0]
+            self.detected_tools.return_value = ()
+
+            result = registration._apply_operation(operation, paths=paths)
+
+            self.assertEqual(result["result"], "skipped-not-detected")
+            self.assertFalse((codex_skills / "actanara-rag" / "SKILL.md").exists())
+
     def test_current_managed_skill_is_idempotent(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -279,7 +316,7 @@ class ExternalRagSkillRegistrationTests(unittest.TestCase):
                 )
 
             self.assertEqual(result["results"][0]["result"], "installed")
-            self.assertIn("nova-RAG Memory", existing.read_text(encoding="utf-8"))
+            self.assertIn("Actanara Memory Search", existing.read_text(encoding="utf-8"))
             backups = list((paths.state_dir / "backups" / "rag-skill-registration").glob("*/codex/SKILL.md"))
             self.assertEqual(len(backups), 1)
             self.assertEqual(backups[0].read_text(encoding="utf-8"), "existing\n")
@@ -289,6 +326,62 @@ class ExternalRagSkillRegistrationTests(unittest.TestCase):
             paths = initialize_home(Path(tmp) / "Actanara", legacy_diary_root=Path(tmp) / "Diary")
             with self.assertRaises(ValueError):
                 plan_rag_skill_registration({"tools": ["codex"], "targets": {"codex": "configPath"}}, paths=paths)
+
+    def test_rejects_non_array_tool_selection(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = initialize_home(Path(tmp) / "Actanara", legacy_diary_root=Path(tmp) / "Diary")
+
+            with self.assertRaisesRegex(ValueError, "tools must be an array"):
+                plan_rag_skill_registration({"tools": "codex"}, paths=paths)
+
+    def test_plan_intersects_selected_detected_and_supported_tools(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = initialize_home(Path(tmp) / "Actanara", legacy_diary_root=Path(tmp) / "Diary")
+            self.detected_tools.return_value = ("codex", "opencode")
+
+            plan = plan_rag_skill_registration({"tools": ["codex", "claudeCode", "opencode"]}, paths=paths)
+
+            self.assertEqual(plan["selectedTools"], ["codex", "claudeCode", "opencode"])
+            self.assertEqual(plan["eligibleTools"], ["codex"])
+            self.assertEqual(
+                plan["excludedTools"],
+                [
+                    {"tool": "claudeCode", "reason": "not-detected"},
+                    {"tool": "opencode", "reason": "skill-registration-unsupported"},
+                ],
+            )
+            self.assertEqual([item["tool"] for item in plan["operations"]], ["codex"])
+
+    def test_existing_skill_is_prior_selection_evidence_for_upgrade_plan(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = initialize_home(root / "Actanara", legacy_diary_root=root / "Diary")
+            codex_skills = root / "codex-skills"
+            existing = codex_skills / "actanara-rag" / "SKILL.md"
+            existing.parent.mkdir(parents=True)
+            existing.write_text(_older_managed_content("codex"), encoding="utf-8")
+            write_settings({"externalTools": {"codex": {"skillsRoot": str(codex_skills)}}}, paths)
+
+            plan = plan_rag_skill_registration(paths=paths)
+
+            self.assertEqual(plan["selectedTools"], ["codex"])
+            self.assertEqual(plan["eligibleTools"], ["codex"])
+            self.assertEqual(plan["operations"][0]["status"], "upgrade")
+
+    def test_apply_accepts_new_memory_confirmation_phrase(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = initialize_home(root / "Actanara", legacy_diary_root=root / "Diary")
+            codex_skills = root / "codex-skills"
+            write_settings({"externalTools": {"codex": {"skillsRoot": str(codex_skills)}}}, paths)
+
+            with patch.dict("os.environ", {"ACTANARA_HOME": str(paths.home)}, clear=False):
+                result = queue_rag_skill_registration(
+                    {"tools": ["codex"], "dryRun": False, "confirmationText": MEMORY_CONFIRMATION_TEXT}
+                )
+
+            self.assertEqual(result["status"], "completed")
+            self.assertTrue((codex_skills / "actanara-rag" / "SKILL.md").is_file())
 
     def test_job_listing_ignores_records_without_ids(self):
         with tempfile.TemporaryDirectory() as tmp:

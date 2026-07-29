@@ -232,6 +232,13 @@ def _configured_source_profile(settings: RagSettings) -> dict[str, Any]:
     }
     if "external-content" in source_sets:
         result["externalSources"] = settings.external_sources.to_dict()
+    if {"agent-native-memory", "agent-native-instructions"}.intersection(source_sets):
+        from data_foundation.paths import runtime_paths_for_home
+        from data_foundation.settings import native_memory_policy_profile
+
+        result["nativeMemory"] = native_memory_policy_profile(
+            runtime_paths_for_home(settings.runtime_home)
+        )
     return result
 
 
@@ -241,7 +248,10 @@ def _source_profiles_match(left: dict[str, Any], right: dict[str, Any]) -> bool:
         return False
     if sorted(str(item) for item in left.get("sourceSets", [])) != sorted(str(item) for item in right.get("sourceSets", [])):
         return False
-    return left.get("externalSources") == right.get("externalSources")
+    return (
+        left.get("externalSources") == right.get("externalSources")
+        and left.get("nativeMemory") == right.get("nativeMemory")
+    )
 
 
 def _server_status(settings: RagSettings, *, probe: bool, timeout_seconds: float) -> dict[str, Any]:

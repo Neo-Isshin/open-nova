@@ -209,7 +209,8 @@ Options:
   --dashboard-port-auto       Choose another port when the preferred port is in use. Default.
   --no-dashboard-port-auto    Stop if the preferred Dashboard port is unavailable.
   --enable-rag                Enable memory and search.
-  --register-rag-skills       Connect memory and search to selected external apps.
+  --register-memory-skills    Connect memory and search to selected external apps.
+  --register-rag-skills       Compatibility alias for --register-memory-skills.
   --enable-dev-test           Advanced: include developer and test software.
   --rag-embedding-mode MODE   Memory model location: local or cloud. Default: local
   --rag-local-model MODEL     Local memory model.
@@ -315,7 +316,7 @@ warn() {
     *"PATH shim"*|*"Shell PATH"*) friendly_message="$(installer_text warning_terminal_command)" ;;
     *"Dashboard port"*|*"lsof"*) friendly_message="$(installer_text warning_dashboard_port)" ;;
     *"standalone Python"*|*"Python >=3.11"*) friendly_message="$(installer_text warning_python)" ;;
-    *"external nova-RAG skill registration"*) friendly_message="$(installer_text warning_tool_connection)" ;;
+    *"external nova-RAG skill registration"*|*"external Memory Search skill"*) friendly_message="$(installer_text warning_tool_connection)" ;;
     *"SSE server disabled"*) friendly_message="$(installer_text warning_dashboard_service_disabled)" ;;
     *"Static snapshot pages"*) friendly_message="" ;;
     *"failed; continuing"*) friendly_message="$(installer_text warning_optional_step)" ;;
@@ -1434,42 +1435,55 @@ prompt_llm_provider_from_catalog() {
 }
 
 detect_external_tool_rows() {
-  local tool_path=""
-  local seen=";"
-  for tool_path in $HOME/.openclaw(N) $HOME/.openclaw-*(N) $HOME/.openclaw_*(N); do
-    if [[ "$seen" != *";${tool_path:A};"* ]]; then
-      print -r -- "openclaw|OpenClaw|🧭|${tool_path:A}"
-      seen="${seen}${tool_path:A};"
-    fi
-  done
-  seen=";"
-  for tool_path in $HOME/.claude(N) $HOME/.claude-*(N) $HOME/.claude_*(N); do
-    if [[ "$seen" != *";${tool_path:A};"* ]]; then
-      print -r -- "claudeCode|Claude Code|🧠|${tool_path:A}"
-      seen="${seen}${tool_path:A};"
-    fi
-  done
-  seen=";"
-  for tool_path in $HOME/.codex(N) $HOME/.codex-*(N) $HOME/.codex_*(N); do
-    if [[ "$seen" != *";${tool_path:A};"* ]]; then
-      print -r -- "codex|Codex|🤖|${tool_path:A}"
-      seen="${seen}${tool_path:A};"
-    fi
-  done
-  seen=";"
-  for tool_path in $HOME/.gemini(N) $HOME/.gemini-*(N) $HOME/.gemini_*(N); do
-    if [[ "$seen" != *";${tool_path:A};"* ]]; then
-      print -r -- "geminiCli|Gemini CLI|💎|${tool_path:A}"
-      seen="${seen}${tool_path:A};"
-    fi
-  done
-  seen=";"
-  for tool_path in $HOME/.hermes(N) $HOME/.hermes-*(N) $HOME/.hermes_*(N); do
-    if [[ "$seen" != *";${tool_path:A};"* ]]; then
-      print -r -- "hermes|Hermes|⚕️|${tool_path:A}"
-      seen="${seen}${tool_path:A};"
-    fi
-  done
+  resolve_python_bin || return 0
+  if ! ACTANARA_INSTALL_USER_HOME="$HOME" \
+    PYTHONPATH="${SOURCE_ROOT}:${SOURCE_ROOT}/src" \
+    "${PYTHON_BIN}" - <<'PY'
+import os
+from pathlib import Path
+
+from data_foundation.external_tool_catalog import detect_external_tools
+
+
+def safe_field(value: object) -> str:
+    return str(value or "").replace("|", "%7C").replace("\r", " ").replace("\n", " ")
+
+
+user_home = Path(os.environ["ACTANARA_INSTALL_USER_HOME"])
+detection = detect_external_tools(user_home=user_home)
+presence = detection.get("toolPresence")
+presence = presence if isinstance(presence, dict) else {}
+for tool_id in detection.get("detectedToolKeys") or []:
+    detail = presence.get(tool_id)
+    if not isinstance(detail, dict) or detail.get("detected") is not True:
+        continue
+    configured_home = str(detail.get("configuredHome") or "")
+    evidence = detail.get("evidence")
+    evidence = evidence if isinstance(evidence, list) else []
+    evidence_path = next(
+        (
+            str(item.get("path") or "")
+            for item in evidence
+            if isinstance(item, dict) and str(item.get("path") or "")
+        ),
+        "",
+    )
+    display_path = configured_home if configured_home and Path(configured_home).exists() else evidence_path
+    print(
+        "|".join(
+            (
+                safe_field(tool_id),
+                safe_field(detail.get("name") or tool_id),
+                safe_field(detail.get("emoji")),
+                safe_field(display_path or configured_home),
+            )
+        )
+    )
+PY
+  then
+    log "shared external tool detection failed; continuing without preselected tools"
+    return 0
+  fi
 }
 
 prompt_external_tools() {
@@ -2040,16 +2054,21 @@ for raw_item in [item for item in selected_external_tools_raw.split(";;") if ite
 if selected_external_tools:
     external_tools_update["installerSelectedTools"] = selected_external_tools
 
-if enable_rag and enable_skill_registration and selected_external_tools:
+if enable_skill_registration and selected_external_tools:
     external_tools_update["installerV2SkillRegistration"] = {
-        "status": "installer-applied",
+        "status": "installer-selected",
         "supportedNow": True,
-        "purpose": "RAG辅助记忆系统",
-        "scope": "Installer apply and Dashboard-managed registration of the Actanara nova-RAG skill into selected tools' global layer",
+        "purpose": "Actanara跨Agent记忆检索",
+        "scope": "Installer apply and Dashboard-managed registration of one Actanara Memory Search skill into detected, selected, supported tools' global layer",
+        "backendPolicy": "runtime-auto: nova-RAG when healthy, otherwise local lexical recall",
         "selectedTools": selected_external_tools,
-        "dryRunEndpoint": "GET /api/settings/external-tools/rag-skill-registration/plan",
-        "applyEndpoint": "POST /api/settings/external-tools/rag-skill-registration",
-        "confirmationTextRequired": "INSTALL ACTANARA RAG SKILL",
+        "dryRunEndpoint": "GET /api/settings/external-tools/memory-skill-registration/plan",
+        "applyEndpoint": "POST /api/settings/external-tools/memory-skill-registration",
+        "confirmationTextRequired": "INSTALL ACTANARA MEMORY SKILL",
+        "acceptedConfirmationTexts": [
+            "INSTALL ACTANARA MEMORY SKILL",
+            "INSTALL ACTANARA RAG SKILL",
+        ],
         "mutationPolicy": "installer writes missing skill files after final install confirmation; exact unmodified generated versions are backed up and upgraded; customized files are preserved unless Dashboard overwrite is explicitly confirmed",
     }
 
@@ -4195,10 +4214,10 @@ run_rag_service_launch_agent_apply() {
 }
 
 run_external_rag_skill_registration_apply() {
-  local technical_label="Registering nova-RAG skill for selected external tools"
+  local technical_label="Reconciling Actanara Memory Search skill for selected external tools"
   local label="$(installer_text step_connect_tools)"
   local log_file=""
-  if [[ "$ENABLE_RAG" != "1" || "$ENABLE_SKILL_REGISTRATION" != "1" ]]; then
+  if [[ "$ENABLE_SKILL_REGISTRATION" != "1" && "$UPGRADE" != "1" ]]; then
     return 0
   fi
   if [[ "$DRY_RUN" == "1" ]]; then
@@ -4212,40 +4231,96 @@ run_external_rag_skill_registration_apply() {
   print -r -- "## ${technical_label}" >> "$log_file"
   if ACTANARA_HOME="${RUNTIME_HOME}" \
     ACTANARA_LOCATION_FILE="${LOCATION_FILE}" \
+    ACTANARA_INSTALL_UPGRADE_RECONCILE="${UPGRADE}" \
+    ACTANARA_INSTALL_EXPLICIT_SKILL_REGISTRATION="${ENABLE_SKILL_REGISTRATION}" \
     PYTHONPATH="${DEPLOY_SOURCE_ROOT}:${DEPLOY_SOURCE_ROOT}/src:${DEPLOY_SOURCE_ROOT}/src/dashboard" \
     "${VENV_PY}" - >> "$log_file" 2>&1 <<'PY'
 import json
+import os
+
+print(json.dumps({"event": "memory-skill-reconcile-start"}), flush=True)
 
 from app.services.external_rag_skill_registration import (
-    CONFIRMATION_TEXT,
     DEFAULT_TARGETS,
-    queue_rag_skill_registration,
+    MEMORY_CONFIRMATION_TEXT,
+    existing_memory_skill_tools,
+    queue_memory_skill_registration,
 )
+from data_foundation.external_tool_catalog import detected_external_tool_ids
 from data_foundation.paths import load_paths
 from data_foundation.settings import read_settings, write_settings
 
-settings = read_settings(load_paths(), redact_secrets=True)
+paths = load_paths()
+settings = read_settings(paths, redact_secrets=True)
 external = settings.get("externalTools") if isinstance(settings.get("externalTools"), dict) else {}
 preference = external.get("installerV2SkillRegistration") if isinstance(external.get("installerV2SkillRegistration"), dict) else {}
+upgrade_reconcile = os.environ.get("ACTANARA_INSTALL_UPGRADE_RECONCILE") == "1"
+explicit_registration = os.environ.get("ACTANARA_INSTALL_EXPLICIT_SKILL_REGISTRATION") == "1"
+existing_tools = existing_memory_skill_tools(paths)
+previously_enabled = (
+    preference.get("supportedNow") is True
+    and str(preference.get("status") or "") in {
+        "dashboard-controlled",
+        "installer-applied",
+        "installer-selected",
+        "reconcile-pending",
+        "reconciled",
+    }
+) or bool(existing_tools)
+print(json.dumps({
+    "event": "memory-skill-reconcile-plan",
+    "upgrade": upgrade_reconcile,
+    "explicit": explicit_registration,
+    "previouslyEnabled": previously_enabled,
+}, sort_keys=True))
+if upgrade_reconcile and not explicit_registration and not previously_enabled:
+    print(json.dumps({"accepted": True, "status": "skipped", "reason": "memory-skill-registration-not-previously-enabled"}))
+    raise SystemExit(0)
 selected = preference.get("selectedTools") if isinstance(preference.get("selectedTools"), list) else external.get("installerSelectedTools")
 selected = selected if isinstance(selected, list) else []
+auto_detect = explicit_registration and not selected
+if auto_detect:
+    selected = list(detected_external_tool_ids(paths))
+if not selected:
+    selected = existing_tools
 tools = []
 for item in selected:
     key = str(item.get("key") or "") if isinstance(item, dict) else str(item)
     if key in DEFAULT_TARGETS and key not in tools:
         tools.append(key)
+print(json.dumps({"event": "memory-skill-reconcile-targets", "tools": tools}, sort_keys=True))
 if not tools:
+    if explicit_registration:
+        write_settings({"externalTools": {"installerV2SkillRegistration": {
+            "status": "reconcile-pending" if upgrade_reconcile else "installer-selected",
+            "supportedNow": True,
+            "selectedTools": [],
+            "autoDetectTools": auto_detect,
+            "lastBackendPolicy": "runtime-auto",
+        }}})
     print(json.dumps({"accepted": True, "status": "skipped", "reason": "no-supported-installer-selected-tools"}))
 else:
-    result = queue_rag_skill_registration({
+    result = queue_memory_skill_registration({
         "tools": tools,
         "dryRun": False,
         "overwrite": False,
-        "confirmationText": CONFIRMATION_TEXT,
-    }, requested_by="installer-v2")
+        "confirmationText": MEMORY_CONFIRMATION_TEXT,
+    }, requested_by="installer-v2-upgrade-reconcile" if upgrade_reconcile else "installer-v2")
+    job = result.get("job") if isinstance(result.get("job"), dict) else {}
+    eligible = job.get("eligibleTools") if isinstance(job.get("eligibleTools"), list) else []
+    excluded = job.get("excludedTools") if isinstance(job.get("excludedTools"), list) else []
     write_settings({"externalTools": {"installerV2SkillRegistration": {
-        "status": "installer-applied",
+        "status": (
+            ("reconciled" if upgrade_reconcile else "installer-applied")
+            if eligible
+            else ("reconcile-pending" if upgrade_reconcile else "installer-selected")
+        ),
         "supportedNow": True,
+        "selectedTools": tools,
+        "autoDetectTools": auto_detect,
+        "eligibleTools": eligible,
+        "excludedTools": excluded,
+        "lastBackendPolicy": "runtime-auto",
     }}})
     print(json.dumps(result, ensure_ascii=False, indent=2))
 PY
@@ -4253,7 +4328,7 @@ PY
     progress_ok "$label"
   else
     progress_fail "$(installer_text step_failed) ${log_file}"
-    warn "Actanara installation completed, but external nova-RAG skill registration failed; retry from Dashboard Settings."
+    warn "Actanara installation completed, but external Memory Search skill reconciliation failed; retry from Dashboard Settings."
   fi
 }
 
@@ -5656,9 +5731,9 @@ run_wizard() {
       RAG_CLOUD_API_KEY_ENV="$(prompt_line "$(installer_text cloud_key_env)" "$RAG_CLOUD_API_KEY_ENV")"
     fi
     wizard_rag_dependency_gate
-    if [[ -n "$SELECTED_EXTERNAL_TOOLS" ]]; then
-      ENABLE_SKILL_REGISTRATION=1
-    fi
+  fi
+  if [[ -n "$SELECTED_EXTERNAL_TOOLS" ]]; then
+    ENABLE_SKILL_REGISTRATION=1
   fi
 }
 
@@ -5761,7 +5836,7 @@ while [[ $# -gt 0 ]]; do
       RAG_ENABLE_SET=1
       shift
       ;;
-    --register-rag-skills)
+    --register-memory-skills|--register-rag-skills)
       ENABLE_SKILL_REGISTRATION=1
       shift
       ;;
@@ -6084,8 +6159,8 @@ log "deployed runtime source: ${DEPLOY_SOURCE_ROOT}"
 log "generated diary output: ${DIARY_OUTPUT_DIR}"
 log "Desktop diary shortcut: $([[ "$CREATE_DESKTOP_DIARY_LINK" == "1" ]] && print "${DESKTOP_DIARY_LINK}" || print disabled)"
 log "selected external tools: $(format_selected_external_tools)"
-if [[ "$ENABLE_RAG" == "1" && "$ENABLE_SKILL_REGISTRATION" == "1" ]]; then
-  log "skill registration: installer writes missing nova-RAG skills for selected external tools; existing skills are preserved"
+if [[ "$ENABLE_SKILL_REGISTRATION" == "1" ]]; then
+  log "skill registration: installer reconciles one dynamic Memory Search skill for detected, selected, supported external tools; customized skills are preserved"
 fi
 log "reports output: ${REPORTS_OUTPUT_DIR}"
 log "snapshots output: ${SNAPSHOTS_OUTPUT_DIR}"
@@ -6153,6 +6228,9 @@ if [[ "$UPGRADE" == "1" ]]; then
   run_guarded_update_transaction
   if [[ "$UPDATE_NOOP" == "1" ]]; then
     log "Actanara update is a no-op; source payload and dependency contract are already active"
+    if [[ "$SOURCE_ONLY" != "1" ]]; then
+      run_external_rag_skill_registration_apply
+    fi
     COMPLETION_TEXT="$(installer_text update_no_changes)"
     print_completion
     exit 0
@@ -6184,12 +6262,13 @@ if [[ "$UPGRADE" == "1" ]]; then
     exit 0
   fi
   if [[ "$REPAIR_EXISTING" != "1" ]]; then
+    run_external_rag_skill_registration_apply
     if [[ "$DRY_RUN" == "1" ]]; then
       COMPLETION_TEXT="$(installer_text upgrade_plan_complete)"
     else
       COMPLETION_TEXT="$(installer_text upgrade_complete)"
       log "Upgrade preserved Settings, runtime manifest, location pointer, live SQLite state without rewind, service loaded/running state, and configured Dashboard port; legacy Python LaunchAgents were transactionally normalized when required"
-      log "Credential rotation, external Skill registration, and background embedding deployment were not performed inside the update transaction"
+      log "Credential rotation and background embedding deployment were not performed inside the update transaction; managed external Memory Search skills were reconciled afterward on a best-effort basis"
     fi
     print_completion
     exit 0

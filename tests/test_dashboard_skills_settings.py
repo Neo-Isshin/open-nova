@@ -50,6 +50,43 @@ class DashboardSkillsSettingsTests(unittest.TestCase):
 
 
 class DashboardSettingsBundleRegressionTests(unittest.TestCase):
+    def test_native_memory_bundle_persists_explicit_consent_without_replacing_local_policy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = initialize_home(root / "Actanara", legacy_diary_root=root / "Diary")
+            read_settings(paths, redact_secrets=False)
+            raw_before = _read_raw_settings(paths)
+
+            with patch.dict(os.environ, {"ACTANARA_HOME": str(paths.home)}, clear=True):
+                saved = dashboard_settings.update_settings_bundle(
+                    {
+                        "settings": {
+                            "memorySearch": {
+                                "nativeMemory": {
+                                    "enabled": True,
+                                    "allowInRag": False,
+                                    "includeInstructions": True,
+                                    "tools": {
+                                        "codex": True,
+                                        "claudeCode": False,
+                                    },
+                                }
+                            }
+                        }
+                    }
+                )
+
+            raw_after = _read_raw_settings(paths)
+
+        self.assertTrue(saved["memorySearch"]["nativeMemory"]["enabled"])
+        self.assertTrue(saved["memorySearch"]["nativeMemory"]["includeInstructions"])
+        self.assertTrue(saved["memorySearch"]["nativeMemory"]["tools"]["codex"])
+        self.assertFalse(saved["memorySearch"]["nativeMemory"]["tools"]["claudeCode"])
+        self.assertEqual(
+            raw_after["memorySearch"]["local"],
+            raw_before["memorySearch"]["local"],
+        )
+
     def test_general_only_bundle_preserves_fresh_llm_groups_and_skips_readiness(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

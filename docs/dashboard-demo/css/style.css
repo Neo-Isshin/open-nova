@@ -148,6 +148,13 @@ body {
 }
 .utility-btn:hover { border-color: var(--purple-light); background: rgba(83,58,253,0.04); color: var(--purple); }
 .utility-btn-muted { color: var(--slate); }
+.utility-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  text-decoration: none;
+}
 .nav-section { }
 .nav-section-title {
   padding: 13px 16px 4px;

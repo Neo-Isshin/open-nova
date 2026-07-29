@@ -1,4 +1,4 @@
-from fastapi import APIRouter, BackgroundTasks
+from fastapi import APIRouter, BackgroundTasks, Request
 try:
     from fastapi import Query
 except ImportError:  # pragma: no cover - exercised by lightweight test stubs
@@ -7,7 +7,7 @@ except ImportError:  # pragma: no cover - exercised by lightweight test stubs
 from fastapi.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
 from app.services import msgbox, rag_index_jobs, scheduler, service_manager, settings, tailscale
-from app.services.dashboard_security import dashboard_security_config
+from app.services.dashboard_security import dashboard_security_config, is_loopback_external_request
 from data_foundation.onboarding_plan import onboarding_subsystem_plan
 from data_foundation.onboarding_status import actanara_onboarding_status
 from data_foundation.settings_transaction import SettingsTransactionError
@@ -544,6 +544,53 @@ async def api_rag_status(probe: bool = True):
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
+@router.get("/memory/status")
+async def api_memory_status(probe: bool = True):
+    try:
+        return await run_in_threadpool(settings.get_memory_status, probe_server=probe)
+    except Exception as e:
+        logger.exception("GET /api/memory/status failed")
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@router.get("/memory/contract")
+async def api_memory_contract():
+    return settings.memory_external_agent_contract()
+
+
+@router.post("/memory/search")
+async def api_memory_search(payload: dict):
+    try:
+        return await run_in_threadpool(settings.memory_external_search, payload)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    except Exception as e:
+        logger.exception("POST /api/memory/search failed")
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@router.post("/memory/local/sync")
+async def api_memory_local_sync():
+    try:
+        return await run_in_threadpool(settings.sync_memory_local_index, rebuild=False)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=409)
+    except Exception as e:
+        logger.exception("POST /api/memory/local/sync failed")
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@router.post("/memory/local/rebuild")
+async def api_memory_local_rebuild():
+    try:
+        return await run_in_threadpool(settings.sync_memory_local_index, rebuild=True)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=409)
+    except Exception as e:
+        logger.exception("POST /api/memory/local/rebuild failed")
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
 @router.get("/rag/settings")
 async def api_get_rag_settings():
     try:
@@ -710,7 +757,10 @@ async def api_rag_v2_manifest_rollback(payload: dict):
 
 
 @router.get("/rag/external/health")
-async def api_rag_external_health(probe: bool = True):
+async def api_rag_external_health(request: Request, probe: bool = True):
+    denied = _reject_non_loopback_memory_external(request)
+    if denied is not None:
+        return denied
     try:
         status = settings.get_rag_status(probe_server=probe)
         return {
@@ -726,7 +776,10 @@ async def api_rag_external_health(probe: bool = True):
 
 
 @router.get("/rag/external/stats")
-async def api_rag_external_stats():
+async def api_rag_external_stats(request: Request):
+    denied = _reject_non_loopback_memory_external(request)
+    if denied is not None:
+        return denied
     try:
         result = settings.rag_stats()
         result["externalAgentContract"] = _external_agent_contract()
@@ -737,10 +790,89 @@ async def api_rag_external_stats():
 
 
 @router.get("/rag/external/contract")
-async def api_rag_external_contract():
+async def api_rag_external_contract(request: Request):
+    denied = _reject_non_loopback_memory_external(request)
+    if denied is not None:
+        return denied
     return settings.rag_external_agent_contract()
 
 
+@router.get("/memory/external/health")
+async def api_memory_external_health(request: Request, probe: bool = True):
+    denied = _reject_non_loopback_memory_external(request)
+    if denied is not None:
+        return denied
+    try:
+        return await run_in_threadpool(settings.memory_external_health, probe_server=probe)
+    except Exception as e:
+        logger.exception("GET /api/memory/external/health failed")
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@router.get("/memory/external/contract")
+async def api_memory_external_contract(request: Request):
+    denied = _reject_non_loopback_memory_external(request)
+    if denied is not None:
+        return denied
+    return settings.memory_external_agent_contract()
+
+
+@router.post("/memory/external/search")
+async def api_memory_external_search(request: Request, payload: dict):
+    denied = _reject_non_loopback_memory_external(request)
+    if denied is not None:
+        return denied
+    query = str((payload or {}).get("query") or "")
+    try:
+        top_k = max(1, min(int((payload or {}).get("topK") or (payload or {}).get("top_k") or 5), 20))
+    except (TypeError, ValueError):
+        top_k = 5
+    try:
+        return await run_in_threadpool(settings.memory_external_search, payload)
+    except ValueError as e:
+        result = settings.normalize_external_rag_search_response(
+            {
+                "available": False,
+                "reason": str(e),
+                "error": str(e),
+                "results": [],
+                "backend": {"kind": "unavailable", "semantic": False, "degraded": True},
+                "capabilities": {
+                    "lexical": False,
+                    "semantic": False,
+                    "metadataFilters": False,
+                    "citations": False,
+                },
+            },
+            query=query,
+            top_k=top_k,
+        )
+        result["externalAgentContract"] = settings.memory_external_agent_contract()
+        return JSONResponse(result, status_code=400)
+    except Exception as e:
+        logger.exception("POST /api/memory/external/search failed")
+        result = settings.normalize_external_rag_search_response(
+            {
+                "available": False,
+                "reason": str(e),
+                "error": str(e),
+                "results": [],
+                "backend": {"kind": "unavailable", "semantic": False, "degraded": True},
+                "capabilities": {
+                    "lexical": False,
+                    "semantic": False,
+                    "metadataFilters": False,
+                    "citations": False,
+                },
+            },
+            query=query,
+            top_k=top_k,
+        )
+        result["externalAgentContract"] = settings.memory_external_agent_contract()
+        return JSONResponse(result, status_code=500)
+
+
+@router.get("/settings/external-tools/memory-skill-registration/plan")
 @router.get("/settings/external-tools/rag-skill-registration/plan")
 async def api_rag_external_skill_registration_plan():
     try:
@@ -761,6 +893,31 @@ async def api_rag_external_skill_registration(payload: dict):
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
+@router.post("/settings/external-tools/memory-skill-registration")
+async def api_memory_external_skill_registration(payload: dict):
+    if not isinstance(payload, dict):
+        return JSONResponse({"error": "payload must be an object"}, status_code=400)
+    tools = payload.get("tools")
+    if not isinstance(tools, list):
+        return JSONResponse(
+            {"error": "tools must be an explicit array of external tool IDs"},
+            status_code=400,
+        )
+    if (payload.get("dryRun", True) is False and not tools):
+        return JSONResponse(
+            {"error": "at least one memory skill registration tool is required"},
+            status_code=400,
+        )
+    try:
+        return settings.rag_external_skill_registration(payload)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    except Exception as e:
+        logger.exception("POST /api/settings/external-tools/memory-skill-registration failed")
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@router.get("/settings/external-tools/memory-skill-registration/jobs")
 @router.get("/settings/external-tools/rag-skill-registration/jobs")
 async def api_rag_external_skill_registration_jobs(limit: int = 20):
     try:
@@ -771,7 +928,10 @@ async def api_rag_external_skill_registration_jobs(limit: int = 20):
 
 
 @router.post("/rag/external/search")
-async def api_rag_external_search(payload: dict):
+async def api_rag_external_search(request: Request, payload: dict):
+    denied = _reject_non_loopback_memory_external(request)
+    if denied is not None:
+        return denied
     query = str((payload or {}).get("query") or "")
     try:
         top_k = int((payload or {}).get("topK") or (payload or {}).get("top_k") or 5)
@@ -823,3 +983,26 @@ async def api_rag_external_reject_mutation():
 
 def _external_agent_contract() -> dict:
     return settings.rag_external_agent_contract()
+
+
+def _reject_non_loopback_memory_external(request: Request) -> JSONResponse | None:
+    client = getattr(request, "client", None)
+    client_host = getattr(client, "host", None)
+    host_header = request.headers.get("host")
+    forwarded_client = (
+        request.headers.get("forwarded")
+        or request.headers.get("x-forwarded-for")
+        or request.headers.get("x-real-ip")
+    )
+    if is_loopback_external_request(client_host, host_header, forwarded_client):
+        return None
+    return JSONResponse(
+        {
+            "error": "memory-external-loopback-required",
+            "message": (
+                "Anonymous external memory access is restricted to a loopback peer "
+                "using a loopback Host. Use the authenticated Dashboard API remotely."
+            ),
+        },
+        status_code=403,
+    )

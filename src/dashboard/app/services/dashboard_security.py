@@ -20,7 +20,7 @@ DASHBOARD_SESSION_TTL_SECONDS = 12 * 60 * 60
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 
 _PROTECTED_PREFIXES = ("/api", "/events")
-_SESSION_EXEMPT_PREFIXES = ("/api/rag/external",)
+_SESSION_EXEMPT_PREFIXES = ("/api/rag/external", "/api/memory/external")
 _BOOTSTRAP_PATHS = {"/", "/dashboard", "/tasks"}
 _BOOTSTRAP_PREFIXES = ("/static", "/diary-data")
 
@@ -154,7 +154,28 @@ def is_protected_path(path: str) -> bool:
 
 def is_session_exempt_path(path: str) -> bool:
     clean = str(path or "")
-    return clean.startswith(_SESSION_EXEMPT_PREFIXES)
+    return any(
+        clean == prefix or clean.startswith(prefix + "/")
+        for prefix in _SESSION_EXEMPT_PREFIXES
+    )
+
+
+def is_loopback_external_request(
+    client_host: str | None,
+    host_header: str | None,
+    forwarded_client: str | None = None,
+) -> bool:
+    """Require both the network peer and requested Host to be loopback.
+
+    The peer check blocks direct remote calls.  The Host check also prevents a
+    public reverse proxy on the same machine from turning the anonymous local
+    facade into a remote endpoint.
+    """
+    if str(forwarded_client or "").strip():
+        return False
+    return _is_loopback_hostname(client_host) and _is_loopback_hostname(
+        _hostname_from_host_header(host_header)
+    )
 
 
 def should_bootstrap_session(path: str, method: str) -> bool:

@@ -27,6 +27,7 @@ RETIRED_SOURCE_SETS = {"legacy-diary-daily"}
 try:
     from data_foundation.diary_markdown import parse_diary_markdown
     from data_foundation.diary_paths import diary_report_paths, diary_report_type_for_filename, iter_diary_markdown_files
+    from data_foundation.memory_corpus import CorpusCollector, collect_memory_corpus, lessons_read_paths
     from data_foundation.nova_task import _extract_nova_task_payload
     from data_foundation.tasks import _parse_report_updates, parse_task_board_markdown
     from data_foundation.time import business_date_for, parse_timestamp
@@ -34,6 +35,7 @@ except ImportError:  # pragma: no cover - direct script fallback
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from data_foundation.diary_markdown import parse_diary_markdown  # type: ignore
     from data_foundation.diary_paths import diary_report_paths, diary_report_type_for_filename, iter_diary_markdown_files  # type: ignore
+    from data_foundation.memory_corpus import CorpusCollector, collect_memory_corpus, lessons_read_paths  # type: ignore
     from data_foundation.nova_task import _extract_nova_task_payload  # type: ignore
     from data_foundation.tasks import _parse_report_updates, parse_task_board_markdown  # type: ignore
     from data_foundation.time import business_date_for, parse_timestamp  # type: ignore
@@ -285,62 +287,94 @@ def collect_candidate_chunks(
     source_sets: list[str] | tuple[str, ...],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     _validate_source_sets(source_sets)
+    return collect_memory_corpus(
+        settings,
+        source_sets,
+        (
+            CorpusCollector(("filtered-dialogue-daily",), _collect_filtered_dialogue_daily),
+            CorpusCollector(("lessons",), _collect_lessons),
+            CorpusCollector(("foundation-usage-rollups",), _collect_foundation_usage_rollups),
+            CorpusCollector(("foundation-dashboard-snapshots",), _collect_foundation_dashboard_snapshots),
+            CorpusCollector(("diary-markdown-sections", "diary-markdown"), _collect_diary_markdown_sections),
+            CorpusCollector(("diary-markdown-embedded-json",), _collect_diary_markdown_embedded_json),
+            CorpusCollector(("technical-report-task-events", "technical-reports"), _collect_technical_report_task_events),
+            CorpusCollector(
+                ("nova-task-work-graph-events",),
+                lambda selected: _collect_nova_task_work_graph_events(
+                    selected,
+                    source_set="nova-task-work-graph-events",
+                ),
+            ),
+            CorpusCollector(
+                ("nova-task-reconciliation-events",),
+                lambda selected: _collect_nova_task_work_graph_events(
+                    selected,
+                    source_set="nova-task-reconciliation-events",
+                ),
+            ),
+            CorpusCollector(("task-board-snapshot",), _collect_task_board_snapshot),
+            CorpusCollector(("foundation-period-projections",), _collect_foundation_period_projections),
+            CorpusCollector(("external-content",), _collect_external_content),
+            CorpusCollector(
+                ("agent-native-memory", "agent-native-instructions"),
+                _collect_agent_native_memory,
+                filter_to_selected_source_sets=True,
+            ),
+        ),
+        retired_source_sets=RETIRED_SOURCE_SETS,
+    )
+
+
+def _collect_agent_native_memory(
+    settings: RagSettings,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    from data_foundation.native_memory_sources import (
+        collect_claude_native_memory,
+        collect_codex_native_memory,
+    )
+    from data_foundation.paths import runtime_paths_for_home
+    from data_foundation.settings import (
+        external_tool_path,
+        resolve_memory_search_settings,
+    )
+
+    paths = runtime_paths_for_home(settings.runtime_home)
+    memory_settings = resolve_memory_search_settings(paths)
+    native = (
+        memory_settings.get("nativeMemory")
+        if isinstance(memory_settings.get("nativeMemory"), dict)
+        else {}
+    )
+    if (
+        native.get("enabled") is not True
+        or native.get("allowInRag") is not True
+    ):
+        return [], []
+    tools = native.get("tools") if isinstance(native.get("tools"), dict) else {}
+    include_instructions = native.get("includeInstructions") is True
     chunks: list[dict[str, Any]] = []
     sources: list[dict[str, Any]] = []
-    if "filtered-dialogue-daily" in source_sets:
-        collected, records = _collect_filtered_dialogue_daily(settings)
-        chunks.extend(collected)
-        sources.extend(records)
-    if "lessons" in source_sets:
-        collected, records = _collect_lessons(settings)
-        chunks.extend(collected)
-        sources.extend(records)
-    if "foundation-usage-rollups" in source_sets:
-        collected, records = _collect_foundation_usage_rollups(settings)
-        chunks.extend(collected)
-        sources.extend(records)
-    if "foundation-dashboard-snapshots" in source_sets:
-        collected, records = _collect_foundation_dashboard_snapshots(settings)
-        chunks.extend(collected)
-        sources.extend(records)
-    if "diary-markdown-sections" in source_sets or "diary-markdown" in source_sets:
-        collected, records = _collect_diary_markdown_sections(settings)
-        chunks.extend(collected)
-        sources.extend(records)
-    if "diary-markdown-embedded-json" in source_sets:
-        collected, records = _collect_diary_markdown_embedded_json(settings)
-        chunks.extend(collected)
-        sources.extend(records)
-    if "technical-report-task-events" in source_sets or "technical-reports" in source_sets:
-        collected, records = _collect_technical_report_task_events(settings)
-        chunks.extend(collected)
-        sources.extend(records)
-    if "nova-task-work-graph-events" in source_sets:
-        collected, records = _collect_nova_task_work_graph_events(settings, source_set="nova-task-work-graph-events")
-        chunks.extend(collected)
-        sources.extend(records)
-    if "nova-task-reconciliation-events" in source_sets:
-        collected, records = _collect_nova_task_work_graph_events(settings, source_set="nova-task-reconciliation-events")
-        chunks.extend(collected)
-        sources.extend(records)
-    if "task-board-snapshot" in source_sets:
-        collected, records = _collect_task_board_snapshot(settings)
-        chunks.extend(collected)
-        sources.extend(records)
-    if "foundation-period-projections" in source_sets:
-        collected, records = _collect_foundation_period_projections(settings)
-        chunks.extend(collected)
-        sources.extend(records)
-    if "external-content" in source_sets:
-        from .rag_external_sources import collect_external_source_chunks
+    if tools.get("codex") is True:
+        result = collect_codex_native_memory(
+            external_tool_path("codex", "home", paths),
+            include_instructions=include_instructions,
+        )
+        chunks.extend(result["documents"])
+        sources.extend(result["sources"])
+    if tools.get("claudeCode") is True:
+        result = collect_claude_native_memory(
+            external_tool_path("claudeCode", "projectsRoot", paths),
+            include_instructions=include_instructions,
+        )
+        chunks.extend(result["documents"])
+        sources.extend(result["sources"])
+    return chunks, sources
 
-        collected, records = collect_external_source_chunks(settings)
-        chunks.extend(collected)
-        sources.extend(records)
-    deduped: dict[str, dict[str, Any]] = {}
-    for chunk in chunks:
-        deduped.setdefault(str(chunk["id"]), chunk)
-    return list(deduped.values()), sources
+
+def _collect_external_content(settings: RagSettings) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    from .rag_external_sources import collect_external_source_chunks
+
+    return collect_external_source_chunks(settings)
 
 
 def _collect_filtered_dialogue_daily(settings: RagSettings) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -385,30 +419,46 @@ def _collect_filtered_dialogue_daily(settings: RagSettings) -> tuple[list[dict[s
 
 
 def _collect_lessons(settings: RagSettings) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    lessons_path = _lessons_path(settings)
+    from data_foundation.paths import runtime_paths_for_home
+
     chunks: list[dict[str, Any]] = []
-    if not lessons_path.exists():
-        return chunks, []
-    for line_number, line in enumerate(_iter_lines(lessons_path), 1):
-        try:
-            payload = json.loads(line)
-        except json.JSONDecodeError:
+    sources: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    runtime_paths = runtime_paths_for_home(settings.runtime_home)
+    paths = lessons_read_paths(
+        canonical_path=_lessons_path(settings),
+        diary_source_root=_diary_source_root(settings),
+        legacy_diary_root=runtime_paths.legacy_diary_root,
+    )
+    for lessons_path in paths:
+        if not lessons_path.exists():
             continue
-        text = str(payload.get("text") or "").strip()
-        if not text:
-            continue
-        chunk = _chunk_payload(
-            source_set="lessons",
-            text=text,
-            layer="lesson",
-            date=payload.get("date"),
-            agent=payload.get("agent"),
-            source_path=lessons_path,
-            line_number=line_number,
-            stable_id=payload.get("id"),
-        )
-        chunks.append(chunk)
-    return chunks, [_source_record("lessons", lessons_path, len(chunks), source_type="jsonl")]
+        count_before = len(chunks)
+        for line_number, line in enumerate(_iter_lines(lessons_path), 1):
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            text = str(payload.get("text") or "").strip()
+            if not text:
+                continue
+            identity = str(payload.get("id") or _text_hash(text))
+            if identity in seen:
+                continue
+            seen.add(identity)
+            chunk = _chunk_payload(
+                source_set="lessons",
+                text=text,
+                layer="lesson",
+                date=payload.get("date"),
+                agent=payload.get("agent"),
+                source_path=lessons_path,
+                line_number=line_number,
+                stable_id=payload.get("id"),
+            )
+            chunks.append(chunk)
+        sources.append(_source_record("lessons", lessons_path, len(chunks) - count_before, source_type="jsonl"))
+    return chunks, sources
 
 
 def _collect_foundation_usage_rollups(settings: RagSettings) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -1018,6 +1068,13 @@ def _source_profile(settings: RagSettings, source_sets: list[str] | tuple[str, .
     }
     if "external-content" in source_sets:
         result["externalSources"] = settings.external_sources.to_dict()
+    if {"agent-native-memory", "agent-native-instructions"}.intersection(source_sets):
+        from data_foundation.paths import runtime_paths_for_home
+        from data_foundation.settings import native_memory_policy_profile
+
+        result["nativeMemory"] = native_memory_policy_profile(
+            runtime_paths_for_home(settings.runtime_home)
+        )
     return result
 
 

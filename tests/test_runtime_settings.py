@@ -5704,7 +5704,28 @@ class RuntimeSettingsTests(unittest.TestCase):
         )
 
         with patch.object(settings_router.settings, "rag_search", return_value={"available": False, "results": []}) as search:
-            response = asyncio.run(settings_router.api_rag_external_search({"query": "hello", "tags": ["coding"]}))
+            from starlette.requests import Request
+
+            request = Request(
+                {
+                    "type": "http",
+                    "http_version": "1.1",
+                    "method": "POST",
+                    "scheme": "http",
+                    "path": "/api/rag/external/search",
+                    "raw_path": b"/api/rag/external/search",
+                    "query_string": b"",
+                    "headers": [(b"host", b"127.0.0.1:3036")],
+                    "client": ("127.0.0.1", 50000),
+                    "server": ("127.0.0.1", 3036),
+                }
+            )
+            response = asyncio.run(
+                settings_router.api_rag_external_search(
+                    request,
+                    {"query": "hello", "tags": ["coding"]},
+                )
+            )
         self.assertFalse(response["available"])
         self.assertTrue(response["externalAgentContract"]["readOnly"])
         self.assertEqual(response["externalAgentContract"]["version"], 2)
@@ -5719,7 +5740,7 @@ class RuntimeSettingsTests(unittest.TestCase):
         self.assertTrue(response["agentic"]["serverSideEventAggregation"])
         search.assert_called_once()
 
-        contract = asyncio.run(settings_router.api_rag_external_contract())
+        contract = asyncio.run(settings_router.api_rag_external_contract(request))
         self.assertTrue(contract["readOnly"])
         self.assertIn("usagePrompt", contract)
 

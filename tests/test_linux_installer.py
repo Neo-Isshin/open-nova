@@ -53,6 +53,221 @@ class LinuxInstallerTests(unittest.TestCase):
         )
         self.assertEqual(plan.rag_embedding_mode, "local")
 
+    def test_memory_skill_cli_is_backend_neutral_and_deduplicates_tool_selection(self):
+        plan = install_linux.build_plan(
+            self._args(
+                "--register-rag-skills",
+                "--memory-skill-tool",
+                "codex",
+                "--memory-skill-tool",
+                "codex",
+                "--memory-skill-tool",
+                "claudeCode",
+            )
+        )
+
+        self.assertTrue(plan.register_memory_skills)
+        self.assertEqual(plan.memory_skill_tools, ("codex", "claudeCode"))
+        self.assertFalse(plan.rag_enabled)
+        self.assertNotIn("rag-server", plan.profiles)
+
+    def test_memory_skill_tool_selection_alone_is_an_explicit_opt_in(self):
+        plan = install_linux.build_plan(
+            self._args("--memory-skill-tool", "codex")
+        )
+
+        self.assertTrue(plan.register_memory_skills)
+        self.assertEqual(plan.memory_skill_tools, ("codex",))
+        self.assertFalse(plan.rag_enabled)
+
+    def test_fresh_not_now_rag_persists_pending_memory_skill_preference(self):
+        plan = install_linux.build_plan(
+            self._args(
+                "--register-memory-skills",
+                "--memory-skill-tool",
+                "codex",
+            )
+        )
+
+        update = install_linux._runtime_settings_update(plan)
+        preference = update["externalTools"]["installerV2SkillRegistration"]
+
+        self.assertFalse(update["rag"]["enabled"])
+        self.assertEqual(preference["status"], "installer-selected")
+        self.assertEqual(preference["selectedTools"], ["codex"])
+        self.assertIn("local lexical recall", preference["backendPolicy"])
+        self.assertIn("memory-skill-registration", preference["dryRunEndpoint"])
+        self.assertIn("memory-skill-registration", preference["applyEndpoint"])
+
+    def test_fresh_memory_skill_registration_writes_a_real_managed_skill(self):
+        from dashboard.app.services import external_rag_skill_registration
+        from data_foundation.paths import initialize_home
+        from data_foundation.settings import read_settings, write_settings
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = initialize_home(root / "runtime")
+            codex_home = root / "codex"
+            codex_skills = codex_home / "skills"
+            codex_home.mkdir()
+            with patch("data_foundation.settings.platform.system", return_value="Darwin"):
+                write_settings(
+                    {
+                        "externalTools": {
+                            "codex": {
+                                "home": str(codex_home),
+                                "skillsRoot": str(codex_skills),
+                            }
+                        }
+                    },
+                    paths,
+                )
+                plan = SimpleNamespace(
+                    runtime=paths.home,
+                    update_mode="fresh",
+                    register_memory_skills=True,
+                    memory_skill_tools=("codex",),
+                    dry_run=False,
+                )
+                result = install_linux._reconcile_memory_skills(plan)
+                settings = read_settings(
+                    paths,
+                    redact_secrets=True,
+                    persist_defaults=False,
+                )
+
+            skill = codex_skills / external_rag_skill_registration.SKILL_ID / "SKILL.md"
+            self.assertEqual(result["status"], "completed")
+            self.assertTrue(skill.is_file())
+            self.assertIn("Actanara Memory Search", skill.read_text(encoding="utf-8"))
+            preference = settings["externalTools"]["installerV2SkillRegistration"]
+            self.assertEqual(preference["status"], "installer-applied")
+            self.assertEqual(preference["eligibleTools"], ["codex"])
+
+    def test_upgrade_does_not_register_memory_for_an_unselected_environment(self):
+        from data_foundation.paths import initialize_home
+        from data_foundation.settings import write_settings
+
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = initialize_home(Path(tmp) / "runtime")
+            with patch("data_foundation.settings.platform.system", return_value="Darwin"):
+                write_settings({"general": {"locale": "en-US"}}, paths)
+                plan = SimpleNamespace(
+                    runtime=paths.home,
+                    update_mode="upgrade",
+                    register_memory_skills=False,
+                    memory_skill_tools=(),
+                    dry_run=False,
+                )
+                with patch(
+                    "dashboard.app.services.external_rag_skill_registration."
+                    "queue_memory_skill_registration"
+                ) as queue:
+                    result = install_linux._reconcile_memory_skills(plan)
+
+            self.assertEqual(
+                result["reason"],
+                "memory-skill-registration-not-previously-enabled",
+            )
+            queue.assert_not_called()
+
+    def test_upgrade_reconciles_an_existing_managed_memory_skill_without_metadata(self):
+        from dashboard.app.services import external_rag_skill_registration
+        from data_foundation.paths import initialize_home
+        from data_foundation.settings import write_settings
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = initialize_home(root / "runtime")
+            codex_home = root / "codex"
+            codex_skills = codex_home / "skills"
+            skill = (
+                codex_skills
+                / external_rag_skill_registration.SKILL_ID
+                / "SKILL.md"
+            )
+            skill.parent.mkdir(parents=True)
+            skill.write_text(
+                external_rag_skill_registration._skill_content("codex"),
+                encoding="utf-8",
+            )
+            codex_home.mkdir(exist_ok=True)
+            with patch("data_foundation.settings.platform.system", return_value="Darwin"):
+                write_settings(
+                    {
+                        "externalTools": {
+                            "codex": {
+                                "home": str(codex_home),
+                                "skillsRoot": str(codex_skills),
+                            }
+                        }
+                    },
+                    paths,
+                )
+                plan = SimpleNamespace(
+                    runtime=paths.home,
+                    update_mode="upgrade",
+                    register_memory_skills=False,
+                    memory_skill_tools=(),
+                    dry_run=False,
+                )
+                result = install_linux._reconcile_memory_skills(plan)
+
+            self.assertEqual(result["status"], "completed")
+            self.assertEqual(result["selectedTools"], ["codex"])
+            self.assertEqual(result["results"][0]["result"], "already-current")
+
+    def test_memory_skill_failure_is_best_effort_after_runtime_commit(self):
+        plan = SimpleNamespace(update_mode="fresh")
+        with patch.object(
+            install_linux,
+            "_reconcile_memory_skills",
+            side_effect=OSError("global skill root is read-only"),
+        ):
+            result = install_linux._reconcile_memory_skills_best_effort(plan)
+
+        self.assertEqual(result["status"], "failed")
+        self.assertTrue(result["installationStatusUnaffected"])
+        self.assertIn("read-only", result["error"])
+
+    def test_main_reports_committed_install_when_post_commit_skill_reconcile_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = Path(tmp) / "runtime"
+            plan = SimpleNamespace(update_mode="fresh", runtime=runtime)
+            failed = {
+                "status": "failed",
+                "bestEffort": True,
+                "installationStatusUnaffected": True,
+                "error": "read-only skill root",
+            }
+            with (
+                patch.object(install_linux, "_recover_fresh_install", return_value=[]),
+                patch.object(install_linux, "build_plan", return_value=plan),
+                patch.object(
+                    install_linux,
+                    "_validate_plan",
+                    return_value=SimpleNamespace(),
+                ),
+                patch.object(install_linux, "_prepare_linger", return_value={}),
+                patch.object(
+                    install_linux,
+                    "_install",
+                    return_value={"status": "installed", "runtime": str(runtime)},
+                ),
+                patch.object(
+                    install_linux,
+                    "_reconcile_memory_skills_best_effort",
+                    return_value=failed,
+                ),
+                patch("builtins.print") as printer,
+            ):
+                status = install_linux.main(["--runtime", str(runtime)])
+
+        self.assertEqual(status, 0)
+        payload = json.loads(printer.call_args.args[0])
+        self.assertEqual(payload["status"], "installed")
+        self.assertEqual(payload["memorySkillRegistration"], failed)
+
     def test_local_rag_selects_both_server_and_local_dependency_profiles(self):
         with tempfile.TemporaryDirectory() as tmp:
             args = self._args(

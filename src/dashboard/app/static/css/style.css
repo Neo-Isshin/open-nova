@@ -177,6 +177,13 @@ body {
 }
 .utility-btn:hover { border-color: var(--purple-light); background: rgba(83,58,253,0.04); color: var(--purple); }
 .utility-btn-muted { color: var(--slate); }
+.utility-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  text-decoration: none;
+}
 .mobile-utility-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

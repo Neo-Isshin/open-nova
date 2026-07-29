@@ -26,6 +26,11 @@ from data_foundation.diary_metrics import (
     write_diary_metrics_table_mismatch_approval,
 )
 from data_foundation.llm_provider_test import check_llm_provider_availability
+from data_foundation.local_memory_search import (
+    local_memory_status,
+    rebuild_local_memory_index,
+    sync_local_memory_index,
+)
 from data_foundation.nova_task import diary_tasks_snapshot, pending_candidate_count
 from data_foundation.paths import default_oneliner_runtime_home, initialize_home, load_paths, runtime_paths_for_home
 from data_foundation.pipeline import run_daily_pipeline
@@ -257,6 +262,19 @@ def _parser() -> argparse.ArgumentParser:
     search = subcommands.add_parser("search", help="Search your Actanara memory.")
     _add_rag_search_args(search)
     search.set_defaults(handler=_search_memory)
+
+    memory = subcommands.add_parser("memory", help="Inspect or refresh lightweight local memory.")
+    memory_subcommands = memory.add_subparsers(dest="memory_command")
+    memory.set_defaults(handler=_command_help(memory))
+    memory_status = memory_subcommands.add_parser("status", help="Show the local memory index status.")
+    _add_status_args(memory_status)
+    memory_status.set_defaults(handler=_memory_status)
+    memory_sync = memory_subcommands.add_parser("sync", help="Incrementally refresh the local memory index.")
+    _add_status_args(memory_sync)
+    memory_sync.set_defaults(handler=_memory_sync)
+    memory_rebuild = memory_subcommands.add_parser("rebuild", help="Safely rebuild the disposable local memory index.")
+    _add_status_args(memory_rebuild)
+    memory_rebuild.set_defaults(handler=_memory_rebuild)
 
     task = subcommands.add_parser("task", help="Show task totals.")
     _add_status_args(task)
@@ -624,6 +642,13 @@ def _add_onboarding_apply_args(parser: argparse.ArgumentParser) -> None:
 def _add_rag_search_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("query", help="Words or question to search for")
     parser.add_argument("--top-k", type=int, default=5, help="Maximum number of results, up to 20")
+    parser.add_argument(
+        "--mode",
+        choices=("auto", "rag", "local"),
+        default="auto",
+        help="Search automatically, require nova-RAG, or use only the local lexical index",
+    )
+    parser.add_argument("--caller", default="", help="Agent requesting recall, for example codex or claude-code")
     parser.add_argument("--dashboard-url", default=None, help="Use a specific Dashboard URL")
     parser.add_argument("--timeout", type=float, default=65, help="Seconds to wait for results")
     parser.add_argument("--date", default="", help="Search one date")
@@ -1445,6 +1470,8 @@ def _search_memory(args: argparse.Namespace) -> int:
             dashboard_url=args.dashboard_url,
             timeout_seconds=args.timeout,
             filters=filters,
+            mode=args.mode,
+            caller=args.caller or None,
         )
     except Exception as exc:
         print(f"Error: {exc}", file=sys.stderr)
@@ -1454,6 +1481,65 @@ def _search_memory(args: argparse.Namespace) -> int:
     else:
         print(compact_memory_results(result, max_results=args.top_k))
     return 0
+
+
+def _memory_status(args: argparse.Namespace) -> int:
+    payload = local_memory_status(_paths_from_args(args) or load_paths())
+    _print_memory_index_result(payload, json_output=args.json, title="Local memory")
+    return 0
+
+
+def _memory_sync(args: argparse.Namespace) -> int:
+    try:
+        payload = sync_local_memory_index(_paths_from_args(args) or load_paths())
+    except Exception as exc:
+        sys.stderr.write(f"Error: {exc}\n")
+        return 1
+    _print_memory_index_result(payload, json_output=args.json, title="Local memory updated")
+    return 0 if payload.get("available") else 1
+
+
+def _memory_rebuild(args: argparse.Namespace) -> int:
+    try:
+        payload = rebuild_local_memory_index(_paths_from_args(args) or load_paths())
+    except Exception as exc:
+        sys.stderr.write(f"Error: {exc}\n")
+        return 1
+    _print_memory_index_result(payload, json_output=args.json, title="Local memory rebuilt")
+    return 0 if payload.get("available") else 1
+
+
+def _print_memory_index_result(
+    payload: dict,
+    *,
+    json_output: bool,
+    title: str,
+) -> None:
+    if json_output:
+        sys.stdout.write(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+        return
+    capabilities = (
+        payload.get("capabilities")
+        if isinstance(payload.get("capabilities"), dict)
+        else {}
+    )
+    sys.stdout.write(
+        render_cli(
+            title,
+            fields=(
+                ("Status", payload.get("status") or "Unknown"),
+                ("Documents", payload.get("documentCount", 0)),
+                ("Sources", payload.get("sourceCount", 0)),
+                ("Semantic", "No" if capabilities.get("semantic") is False else "Yes"),
+                ("Index", payload.get("indexPath") or (payload.get("backend") or {}).get("indexPath")),
+            ),
+            next_steps=(
+                ()
+                if payload.get("ready")
+                else ("actanara memory sync",)
+            ),
+        )
+    )
 
 
 def _task_counts(args: argparse.Namespace) -> int:

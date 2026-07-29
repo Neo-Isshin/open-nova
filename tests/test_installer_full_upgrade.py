@@ -237,10 +237,16 @@ class InstallerFullUpgradeTests(unittest.TestCase):
                 record("candidate", "pip")
                 maybe_fault("pip")
                 raise SystemExit(0)
-            if args == ["-"]:
+            if (
+                args == ["-"]
+                and os.environ.get("ACTANARA_INSTALL_MISSING_DEPENDENCIES_FILE")
+            ):
                 record("candidate", "dependency")
                 maybe_fault("dependency")
                 print("dependency gate ok: isolated full-upgrade candidate")
+                raise SystemExit(0)
+            if args == ["-"]:
+                record("candidate", "skill-reconcile")
                 raise SystemExit(0)
             if args[:3] == ["-m", "data_foundation.cli", "doctor"]:
                 record("candidate", "doctor")

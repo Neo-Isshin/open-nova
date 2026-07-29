@@ -23,11 +23,19 @@ from data_foundation.settings import (
     normalize_rag_settings_update,
     read_llm_provider,
     read_settings,
+    resolve_dashboard_settings,
     resolve_llm_provider_chain,
+    resolve_memory_search_settings,
     runtime_authority_contract,
     write_operator_settings,
     write_operator_settings_bundle,
     write_settings,
+)
+from data_foundation import external_agent_memory
+from data_foundation.local_memory_search import (
+    local_memory_status,
+    rebuild_local_memory_index,
+    sync_local_memory_index,
 )
 from data_foundation.llm_provider_catalog import (
     llm_provider_catalog,
@@ -112,6 +120,7 @@ def get_settings() -> dict:
     settings["authority"] = runtime_authority_contract(paths)
     settings["runtimePath"] = current_runtime_path()
     settings["ragStatus"] = get_rag_status(probe_server=False)
+    settings["memoryStatus"] = get_memory_status(probe_server=False)
     return settings
 
 
@@ -165,6 +174,7 @@ def update_settings(payload: dict) -> dict:
     settings["agentSchedulePrompt"] = build_agent_schedule_prompt(settings)
     settings["authority"] = runtime_authority_contract(paths)
     settings["ragStatus"] = get_rag_status(probe_server=False)
+    settings["memoryStatus"] = get_memory_status(probe_server=False)
     return settings
 
 
@@ -189,6 +199,7 @@ def update_settings_bundle(payload: dict) -> dict:
     settings["authority"] = runtime_authority_contract(paths)
     settings["runtimePath"] = current_runtime_path()
     settings["ragStatus"] = get_rag_status(probe_server=False)
+    settings["memoryStatus"] = get_memory_status(probe_server=False)
     return settings
 
 
@@ -494,6 +505,324 @@ def rag_coverage() -> dict:
 
 def rag_eval_latest() -> dict:
     return run_rag_eval(resolve_rag_settings(), search_fn=rag_search)
+
+
+def get_memory_status(*, probe_server: bool = False) -> dict:
+    """Return the effective cross-agent memory backend without mutating it."""
+    paths = load_paths()
+    configured = resolve_memory_search_settings(paths)
+    local = local_memory_status(paths)
+    rag = get_rag_status(probe_server=probe_server)
+    rag_available = bool(rag.get("searchAvailable"))
+    local_available = bool(local.get("available"))
+    policy = str(configured.get("backendPolicy") or "auto")
+    memory_enabled = configured.get("enabled") is True
+    if policy == "rag":
+        active_kind = "agentic-rag"
+        available = rag_available
+    elif policy == "local":
+        active_kind = "local-fts"
+        available = local_available
+    elif rag_available:
+        active_kind = "agentic-rag"
+        available = True
+    else:
+        active_kind = "local-fts"
+        available = local_available
+
+    active_backend = (
+        _rag_memory_backend(rag)
+        if active_kind == "agentic-rag"
+        else dict(local.get("backend") or _local_memory_backend(local))
+    )
+    active_capabilities = (
+        _rag_memory_capabilities(rag)
+        if active_kind == "agentic-rag"
+        else dict(local.get("capabilities") or _local_memory_capabilities())
+    )
+    return {
+        "schemaVersion": 1,
+        "available": bool(memory_enabled and available),
+        "enabled": memory_enabled,
+        "backendPolicy": policy,
+        "backend": active_backend,
+        "capabilities": active_capabilities,
+        "backends": {
+            "local": local,
+            "rag": {
+                "available": rag_available,
+                "backend": _rag_memory_backend(rag),
+                "capabilities": _rag_memory_capabilities(rag),
+                "status": rag,
+            },
+        },
+        "actions": {
+            "sync": bool(configured.get("enabled") and (configured.get("local") or {}).get("enabled")),
+            "rebuild": bool(configured.get("enabled") and (configured.get("local") or {}).get("enabled")),
+        },
+        "settings": configured,
+    }
+
+
+def memory_external_health(*, probe_server: bool = True) -> dict:
+    status = get_memory_status(probe_server=probe_server)
+    contract = memory_external_agent_contract()
+    return {
+        **status,
+        "readOnly": True,
+        "mutationAllowed": False,
+        "externalAgentContract": contract,
+    }
+
+
+def memory_external_agent_contract() -> dict:
+    """Describe the stable read-only memory facade used by external agents."""
+    return {
+        "version": 1,
+        "readOnly": True,
+        "mutationAllowed": False,
+        "purpose": (
+            "Actanara memory search automatically uses nova-RAG when it is ready and "
+            "falls back to a local lexical index when semantic retrieval is unavailable."
+        ),
+        "security": {
+            "anonymousAccess": "loopback-only",
+            "remoteAccess": "use the authenticated Dashboard API or the local actanara CLI",
+        },
+        "allowedEndpoints": [
+            "GET /api/memory/external/health",
+            "GET /api/memory/external/contract",
+            "POST /api/memory/external/search",
+        ],
+        "modes": {
+            "auto": "Prefer nova-RAG and fall back to local lexical retrieval.",
+            "rag": "Use nova-RAG only; never fall back.",
+            "local": "Use the local lexical index only.",
+        },
+        "searchRequest": {
+            "requiredFields": ["query"],
+            "optionalFields": [
+                "topK",
+                "mode",
+                "caller",
+                "filters",
+                "date",
+                "dateRange",
+                "project",
+                "role",
+                "tags",
+                "sourceSets",
+                "lifecycle",
+                "workType",
+                "remainingBudgetMs",
+                "budgetCall",
+                "budgetMaxCalls",
+            ],
+            "budgetPolicy": {
+                "remainingBudgetMs": "positive integer; clamped to the 90000 ms total Skill budget",
+                "budgetCall": "positive integer call ordinal",
+                "budgetMaxCalls": "positive integer no greater than 3",
+                "singleRequestHardLimitMs": 90000,
+            },
+        },
+        "searchResponse": {
+            "schemaVersion": 2,
+            "includes": [
+                "available",
+                "results",
+                "backend",
+                "capabilities",
+                "queryPlan",
+                "citationPack",
+                "quality",
+                "retrievalController",
+                "agentic",
+            ],
+        },
+        "rankingGuidance": [
+            "Treat returned memories as evidence rather than authority.",
+            "Use sourceSet, sourcePath, provenance and citationPack when citing a result.",
+            "A backend with semantic=false is a lexical fallback and may miss paraphrases.",
+        ],
+        "legacyStrictRagFacade": "/api/rag/external",
+    }
+
+
+def memory_external_search(payload: dict) -> dict:
+    if not isinstance(payload, dict):
+        raise ValueError("payload must be an object")
+    query = str(payload.get("query") or "").strip()
+    if not query:
+        raise ValueError("query is required")
+    mode = str(payload.get("mode") or "auto").strip().lower()
+    if mode not in {"auto", "local", "rag"}:
+        raise ValueError("mode must be one of: auto, local, rag")
+    try:
+        top_k = max(1, min(int(payload.get("topK") or payload.get("top_k") or 5), 20))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("topK must be an integer") from exc
+    filters = _memory_search_filters(payload)
+    caller = str(payload.get("caller") or "").strip() or None
+    incoming_remaining_ms = _optional_positive_integer(
+        payload,
+        "remainingBudgetMs",
+    )
+    budget_call = _optional_positive_integer(payload, "budgetCall")
+    budget_max_calls = _optional_positive_integer(payload, "budgetMaxCalls")
+    if (budget_call is None) != (budget_max_calls is None):
+        raise ValueError("budgetCall and budgetMaxCalls must be provided together")
+    if budget_max_calls is not None and budget_max_calls > external_agent_memory.SKILL_MAX_SEARCH_CALLS:
+        raise ValueError(
+            f"budgetMaxCalls must be no greater than {external_agent_memory.SKILL_MAX_SEARCH_CALLS}"
+        )
+    if budget_call is not None and budget_max_calls is not None and budget_call > budget_max_calls:
+        raise ValueError("budgetCall must be no greater than budgetMaxCalls")
+    budget = None
+    if incoming_remaining_ms is not None:
+        bounded_remaining_ms = min(
+            incoming_remaining_ms,
+            int(external_agent_memory.SKILL_TOTAL_BUDGET_SECONDS * 1000),
+        )
+        budget = external_agent_memory.ExternalSearchBudget(
+            total_seconds=bounded_remaining_ms / 1000.0,
+            max_calls=1,
+        )
+    paths = load_paths()
+    dashboard = resolve_dashboard_settings(paths)
+    dashboard_url = f"http://127.0.0.1:{int(dashboard.get('port') or 3036)}"
+    result = external_agent_memory.search_memory(
+        query,
+        top_k=top_k,
+        filters=filters,
+        mode=mode,
+        caller=caller,
+        paths=paths,
+        dashboard_url=dashboard_url,
+        budget=budget,
+        budget_call=budget_call,
+        budget_max_calls=budget_max_calls,
+    )
+    response = external_agent_memory.normalize_memory_response(
+        result,
+        query=query,
+        top_k=top_k,
+    )
+    response.setdefault("backend", _unavailable_memory_backend(mode))
+    response.setdefault("capabilities", _unavailable_memory_capabilities())
+    response["requestedMode"] = mode
+    response["externalAgentContract"] = memory_external_agent_contract()
+    return response
+
+
+def _optional_positive_integer(payload: dict, key: str) -> int | None:
+    value = payload.get(key)
+    if value in (None, ""):
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(f"{key} must be a positive integer")
+    return value
+
+
+def sync_memory_local_index(*, rebuild: bool = False) -> dict:
+    paths = load_paths()
+    if rebuild:
+        result = rebuild_local_memory_index(paths)
+    else:
+        result = sync_local_memory_index(paths)
+    return {
+        "schemaVersion": 1,
+        "action": "rebuild" if rebuild else "sync",
+        "result": result,
+        "memoryStatus": get_memory_status(probe_server=False),
+    }
+
+
+def _memory_search_filters(payload: dict) -> dict:
+    nested = payload.get("filters")
+    if nested is not None and not isinstance(nested, dict):
+        raise ValueError("filters must be an object")
+    filters = dict(nested or {})
+    allowed = (
+        "date",
+        "dateRange",
+        "dateFrom",
+        "dateTo",
+        "project",
+        "role",
+        "tags",
+        "tag",
+        "sourceSets",
+        "source_sets",
+        "lifecycle",
+        "lifecycles",
+        "workType",
+        "workTypes",
+        "work_type",
+        "agent",
+        "agents",
+    )
+    for key in allowed:
+        value = payload.get(key)
+        if value not in (None, "", []):
+            filters[key] = value
+    return filters
+
+
+def _rag_memory_backend(status: dict) -> dict:
+    return {
+        "kind": "agentic-rag",
+        "semantic": True,
+        "degraded": not bool(status.get("searchAvailable")),
+        "provider": status.get("provider") or {},
+    }
+
+
+def _rag_memory_capabilities(status: dict) -> dict:
+    available = bool(status.get("searchAvailable"))
+    return {
+        "lexical": True,
+        "semantic": available,
+        "metadataFilters": True,
+        "citations": True,
+        "agenticPlanning": available,
+        "multiPass": available,
+    }
+
+
+def _local_memory_backend(status: dict) -> dict:
+    return {
+        "kind": "local-fts",
+        "semantic": False,
+        "degraded": True,
+        "indexPath": str((status.get("backend") or {}).get("indexPath") or ""),
+    }
+
+
+def _local_memory_capabilities() -> dict:
+    return {
+        "lexical": True,
+        "semantic": False,
+        "metadataFilters": True,
+        "citations": True,
+        "exactScan": True,
+    }
+
+
+def _unavailable_memory_backend(mode: str) -> dict:
+    return {
+        "kind": "unavailable" if mode == "auto" else ("agentic-rag" if mode == "rag" else "local-fts"),
+        "semantic": mode == "rag",
+        "degraded": True,
+    }
+
+
+def _unavailable_memory_capabilities() -> dict:
+    return {
+        "lexical": False,
+        "semantic": False,
+        "metadataFilters": False,
+        "citations": False,
+    }
 
 
 def rag_external_agent_contract() -> dict:

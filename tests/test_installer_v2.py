@@ -741,29 +741,111 @@ exit 1
         self.assertIn('if [[ -z "$row" ]]; then', script)
         self.assertIn('if [[ "${#fields[@]}" -lt 4 ]]; then', script)
 
-    def test_wizard_skill_registration_is_rag_gated_after_rag_choices(self):
+    def test_wizard_external_tool_rows_use_shared_detector_without_antigravity_gemini_collision(self):
+        script = INSTALLER.read_text(encoding="utf-8")
+        detector = "detect_external_tool_rows() {" + script.split(
+            "detect_external_tool_rows() {", 1
+        )[1].split("\n}\n\nprompt_external_tools() {", 1)[0] + "\n}\n"
+
+        self.assertIn(
+            "from data_foundation.external_tool_catalog import detect_external_tools",
+            detector,
+        )
+        self.assertIn("detect_external_tools(user_home=user_home)", detector)
+        self.assertNotIn("$HOME/.gemini(N)", detector)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            (home / ".local" / "share" / "opencode").mkdir(parents=True)
+            (home / ".local" / "share" / "opencode" / "opencode.db").touch()
+            (home / ".gemini" / "antigravity-cli" / "conversations").mkdir(parents=True)
+            (home / ".cursor" / "chats").mkdir(parents=True)
+
+            runner = home / "detect-external-tools.zsh"
+            runner.write_text(
+                """#!/usr/bin/env zsh
+set -eu
+SOURCE_ROOT="$ACTANARA_TEST_SOURCE_ROOT"
+PYTHON_BIN="$ACTANARA_TEST_PYTHON"
+resolve_python_bin() { return 0 }
+log() { return 0 }
+"""
+                + detector
+                + "\ndetect_external_tool_rows\n",
+                encoding="utf-8",
+            )
+            env = {
+                **os.environ,
+                "HOME": str(home),
+                "XDG_DATA_HOME": str(home / ".local" / "share"),
+                "XDG_CONFIG_HOME": str(home / ".config"),
+                "PATH": "/usr/bin:/bin",
+                "ACTANARA_HOME": str(home / ".actanara"),
+                "ACTANARA_LOCATION_FILE": str(home / ".config" / "actanara" / "location.json"),
+                "ACTANARA_TEST_SOURCE_ROOT": str(ROOT),
+                "ACTANARA_TEST_PYTHON": sys.executable,
+            }
+            completed = subprocess.run(
+                ["/bin/zsh", str(runner)],
+                cwd=ROOT,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        rows = {
+            fields[0]: fields
+            for fields in (
+                line.split("|", 3)
+                for line in completed.stdout.splitlines()
+                if line.strip()
+            )
+        }
+        self.assertIn("opencode", rows)
+        self.assertEqual(rows["opencode"][1], "OpenCode")
+        self.assertIn("antigravity", rows)
+        self.assertEqual(rows["antigravity"][1], "Antigravity")
+        self.assertIn("cursor", rows)
+        self.assertEqual(rows["cursor"][1], "Cursor")
+        self.assertNotIn("geminiCli", rows)
+
+    def test_wizard_skill_registration_is_backend_neutral_after_memory_choice(self):
         script = INSTALLER.read_text(encoding="utf-8")
 
         rag_choice = script.index("prompt_rag_choice")
         skill_registration = script.index("ENABLE_SKILL_REGISTRATION=1")
         self.assertGreater(skill_registration, rag_choice)
         self.assertNotIn("Enable Dashboard-controlled nova-RAG memory skill registration for selected tools?", script)
-        self.assertIn('if [[ "$ENABLE_RAG" == "1" ]]; then', script)
+        wizard = script.split("run_wizard() {", 1)[1].split("\n}\n\nwhile [[ $# -gt 0", 1)[0]
+        self.assertIn('if [[ -n "$SELECTED_EXTERNAL_TOOLS" ]]; then\n    ENABLE_SKILL_REGISTRATION=1', wizard)
+        self.assertNotIn(
+            'if [[ "$ENABLE_RAG" == "1" && "$ENABLE_SKILL_REGISTRATION" == "1" ]]',
+            script,
+        )
         self.assertIn('if [[ -n "$SELECTED_EXTERNAL_TOOLS" ]]; then', script)
         self.assertIn("ENABLE_SKILL_REGISTRATION=1", script)
         self.assertIn("installerV2SkillRegistration", script)
-        self.assertIn("RAG辅助记忆系统", script)
-        self.assertIn('"status": "installer-applied"', script)
+        self.assertIn("Actanara跨Agent记忆检索", script)
+        self.assertIn('"status": "installer-selected"', script)
         self.assertIn('"supportedNow": True', script)
-        self.assertIn('"applyEndpoint": "POST /api/settings/external-tools/rag-skill-registration"', script)
-        self.assertIn('"confirmationTextRequired": "INSTALL ACTANARA RAG SKILL"', script)
+        self.assertIn('"applyEndpoint": "POST /api/settings/external-tools/memory-skill-registration"', script)
+        self.assertIn('"confirmationTextRequired": "INSTALL ACTANARA MEMORY SKILL"', script)
+        self.assertIn('"acceptedConfirmationTexts": [', script)
+        self.assertIn('"INSTALL ACTANARA MEMORY SKILL"', script)
         self.assertIn("exact unmodified generated versions are backed up and upgraded", script)
         self.assertIn("customized files are preserved unless Dashboard overwrite is explicitly confirmed", script)
-        self.assertIn("installer writes missing nova-RAG skills for selected external tools", script)
+        self.assertIn("one Actanara Memory Search skill", script)
+        self.assertIn("--register-memory-skills", script)
         self.assertIn("--register-rag-skills", script)
-        self.assertIn("queue_rag_skill_registration", script)
-        self.assertLess(script.index("apply_installer_settings_overlay\n"), script.index("run_external_rag_skill_registration_apply\n"))
-        self.assertIn("enable_rag and enable_skill_registration and selected_external_tools", script)
+        self.assertIn("queue_memory_skill_registration", script)
+        configure_phase = script.index("print_phase phase_configuring")
+        self.assertLess(
+            script.index("apply_installer_settings_overlay\n", configure_phase),
+            script.index("run_external_rag_skill_registration_apply\n", configure_phase),
+        )
+        self.assertIn("if enable_skill_registration and selected_external_tools", script)
 
     def test_wizard_dry_run_uses_summary_only_output(self):
         script = INSTALLER.read_text(encoding="utf-8")
@@ -774,6 +856,22 @@ exit 1
         self.assertIn('if [[ "$SUMMARY_ONLY" == "1" && -t 1 && -r /dev/tty ]]; then', script)
         self.assertIn("print_install_summary", script)
         self.assertIn("print_useful_commands", script)
+
+    def test_memory_skill_reconcile_is_best_effort_after_upgrade_commit(self):
+        script = INSTALLER.read_text(encoding="utf-8")
+        reconcile = script.split("run_external_rag_skill_registration_apply() {", 1)[1].split(
+            "\n}\n\nmaybe_fail_update_phase()", 1
+        )[0]
+
+        self.assertIn('if [[ "$ENABLE_SKILL_REGISTRATION" != "1" && "$UPGRADE" != "1" ]]', reconcile)
+        self.assertIn("installer-v2-upgrade-reconcile", reconcile)
+        self.assertIn("existing_memory_skill_tools", reconcile)
+        self.assertIn("detected_external_tool_ids", reconcile)
+        self.assertIn("auto_detect = explicit_registration and not selected", reconcile)
+        self.assertIn('"selectedTools": tools', reconcile)
+        self.assertIn("progress_fail", reconcile)
+        self.assertIn("external Memory Search skill reconciliation failed", reconcile)
+        self.assertNotIn("return 1", reconcile)
 
     def test_wizard_presents_core_and_rag_dependency_gates(self):
         script = INSTALLER.read_text(encoding="utf-8")
@@ -1545,7 +1643,7 @@ exit 1
                 self.assertIn(phase, events)
                 self.assertFalse((app / ".update-transaction.lock").exists())
 
-    def test_atomic_update_defers_external_rag_skill_registration(self):
+    def test_atomic_update_invokes_post_commit_reconcile_without_transactional_skill_write(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             home = root / "Home"
@@ -1609,6 +1707,12 @@ exit 1
             saved = (runtime / "config" / "settings.json").read_text(encoding="utf-8")
             self.assertIn('"status": "dashboard-controlled"', saved)
             self.assertNotIn('"status": "installer-applied"', saved)
+            script = INSTALLER.read_text(encoding="utf-8")
+            upgrade_flow = script.split('if [[ "$UPGRADE" == "1" ]]; then\n  print_phase phase_installing', 1)[1]
+            self.assertLess(
+                upgrade_flow.index("run_guarded_update_transaction"),
+                upgrade_flow.index("run_external_rag_skill_registration_apply"),
+            )
 
     def test_installer_copy_uses_semantic_lines_and_display_width_aware_wrapping(self):
         script = INSTALLER.read_text(encoding="utf-8")

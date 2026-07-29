@@ -24,10 +24,12 @@ for candidate in (ROOT, SRC_ROOT):
 import config
 
 try:
+    from data_foundation.memory_corpus import canonical_lessons_path
     from data_foundation.paths import RuntimePaths, load_paths
 except ImportError:  # pragma: no cover - direct script fallback
     RuntimePaths = Any  # type: ignore
     load_paths = None  # type: ignore
+    canonical_lessons_path = None  # type: ignore
 
 
 DEFAULT_ZH_1024_MODEL = "BAAI/bge-large-zh-v1.5"
@@ -240,6 +242,38 @@ def resolve_rag_settings(paths: RuntimePaths | None = None, settings: dict | Non
     product_enabled = bool(enabled and mode != "disabled")
     server_enabled_default = bool(features.get("embeddingServer", True))
     server_enabled = product_enabled and _to_bool(_setting_or_default(server.get("enabled"), server_enabled_default))
+    indexing_source_sets = _normalize_indexing_source_sets(
+        _as_list(indexing.get("sourceSets"), DEFAULT_INDEXING_SOURCE_SETS)
+    )
+    memory_search = (
+        runtime_settings.get("memorySearch")
+        if isinstance(runtime_settings.get("memorySearch"), dict)
+        else {}
+    )
+    native_memory = (
+        memory_search.get("nativeMemory")
+        if isinstance(memory_search.get("nativeMemory"), dict)
+        else {}
+    )
+    native_tools = (
+        native_memory.get("tools")
+        if isinstance(native_memory.get("tools"), dict)
+        else {}
+    )
+    if (
+        _to_bool(native_memory.get("enabled", True))
+        and _to_bool(native_memory.get("allowInRag", True))
+        and any(
+            _to_bool(native_tools.get(tool, True))
+            for tool in ("codex", "claudeCode")
+        )
+    ):
+        native_source_sets = ["agent-native-memory"]
+        if _to_bool(native_memory.get("includeInstructions", True)):
+            native_source_sets.append("agent-native-instructions")
+        indexing_source_sets = tuple(
+            dict.fromkeys((*indexing_source_sets, *native_source_sets))
+        )
 
     return RagSettings(
         enabled=enabled,
@@ -275,9 +309,7 @@ def resolve_rag_settings(paths: RuntimePaths | None = None, settings: dict | Non
             str(_setting_or_default(server.get("healthPath"), DEFAULT_RAG_SERVER_HEALTH_PATH))
         ),
         indexing_enabled=_to_bool(indexing.get("enabled", True)),
-        indexing_source_sets=_normalize_indexing_source_sets(
-            _as_list(indexing.get("sourceSets"), DEFAULT_INDEXING_SOURCE_SETS)
-        ),
+        indexing_source_sets=indexing_source_sets,
         indexing_default_full_rebuild=_to_bool(indexing.get("defaultFullRebuild", False)),
         external_sources=external_sources,
         retrieval_top_k=_positive_int(retrieval.get("topK", 8), "rag.retrieval.topK"),
@@ -347,6 +379,8 @@ def _default_diary_source_root(paths: RuntimePaths) -> Path:
 
 
 def _default_lessons_path(paths: RuntimePaths, diary_source_root: Path) -> Path:
+    if canonical_lessons_path is not None:
+        return canonical_lessons_path(paths)
     return Path(getattr(paths, "home", diary_source_root)) / "artifacts" / "learning" / "lessons.jsonl"
 
 
