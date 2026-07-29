@@ -4,6 +4,43 @@ All notable public changes to Actanara are documented here.
 
 ## Unreleased
 
+## [1.7.0] - 2026-07-29
+
+### Added
+
+- Add Memory Search with an automatic retrieval router: use ready `nova-RAG`
+  for semantic recall, then fall back to an incremental local SQLite FTS5 and
+  trigram index, with a bounded exact scan as the final local path.
+- Add allowlisted native-memory adapters for Codex and Claude Code, including
+  managed memory summaries and optional instruction Markdown, with source
+  lineage, policy digests, bounded discovery, and per-tool controls.
+- Add Dashboard Memory status, search, sync, rebuild, backend diagnostics, and
+  Agent Native Memory controls, plus one dynamic read-only Memory Search Skill
+  that works with or without `nova-RAG`.
+
+### Changed
+
+- Enable Codex memory, Claude Code memory, allowlisted instruction files, and
+  eligible `nova-RAG` ingestion by default for new or previously unspecified
+  settings, while preserving every explicit `false` during upgrades.
+- Keep cross-Agent recall available after choosing **Not Now** for `nova-RAG`;
+  installers on macOS and Linux now reconcile the same detected-and-selected
+  Skill targets and local-index lifecycle.
+- Connect every Dashboard GitHub surface to the Actanara project home,
+  including desktop, mobile, Settings, and the static Demo.
+
+### Security and compatibility
+
+- Keep the generic external Memory API read-only and loopback-only, require a
+  loopback Host as well as peer, and enforce bounded queries, deadlines, and
+  response metadata without exposing lifecycle or settings mutation.
+- Read only documented Markdown allowlists from native Agent homes; reject
+  escaping, unsafe, oversized, or unsupported paths, and never inspect raw
+  session stores or Cursor's private SQLite databases.
+- Retain the legacy strict `actanara rag search-memory` and
+  `/api/rag/external/*` compatibility paths while exposing backend metadata so
+  callers can distinguish semantic RAG from lower-quality lexical fallback.
+
 ## [1.6.0] - 2026-07-28
 
 ### Added
@@ -293,6 +330,7 @@ managed background services executing an older concrete source directory.
 - Runtime secrets remain in the Runtime-local private secret store and are
   excluded from source and release artifacts.
 
+[1.7.0]: https://github.com/Neo-Isshin/actanara/releases/tag/v1.7.0
 [1.6.0]: https://github.com/Neo-Isshin/actanara/releases/tag/v1.6.0
 [1.5.0]: https://github.com/Neo-Isshin/actanara/releases/tag/v1.5.0
 [1.4.0]: https://github.com/Neo-Isshin/actanara/releases/tag/v1.4.0

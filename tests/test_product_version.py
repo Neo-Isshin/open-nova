@@ -13,7 +13,7 @@ from data_foundation.version import UNKNOWN_VERSION, product_version
 
 class ProductVersionTests(unittest.TestCase):
     def test_active_source_pyproject_is_the_version_authority(self):
-        self.assertEqual(product_version(), "1.6.0")
+        self.assertEqual(product_version(), "1.7.0")
 
     def test_installed_metadata_is_used_without_source_pyproject(self):
         with (
